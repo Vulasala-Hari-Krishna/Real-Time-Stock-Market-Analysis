@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  IAM resources for the stock market analytics pipeline.
+  Creates a pipeline IAM user with least-privilege access to S3 data lake,
+  Athena query execution, and Glue catalog read. Stores credentials in
+  Secrets Manager.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+    Description: Deployment environment
+  ProjectName:
+    Type: String
+    Default: stock-market-pipeline
+    Description: Project name used in resource naming
+
+Resources:
+  PipelineUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub '${ProjectName}-pipeline-${Environment}'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  PipelineAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref PipelineUser
+
+  PipelinePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-pipeline-policy-${Environment}'
+      Description: Least-privilege policy for pipeline S3, Athena, and Glue access
+      Users:
+        - !Ref PipelineUser
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3DataLakeReadWrite
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !ImportValue
+                  Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+              - !Sub
+                - '${BucketArn}/*'
+                - BucketArn: !ImportValue
+                    Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+          - Sid: S3AthenaResultsReadWrite
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !ImportValue
+                  Fn::Sub: '${ProjectName}-${Environment}-AthenaResultsBucketArn'
+              - !Sub
+                - '${BucketArn}/*'
+                - BucketArn: !ImportValue
+                    Fn::Sub: '${ProjectName}-${Environment}-AthenaResultsBucketArn'
+          - Sid: AthenaQueryExecution
+            Effect: Allow
+            Action:
+              - athena:StartQueryExecution
+              - athena:StopQueryExecution
+              - athena:GetQueryExecution
+              - athena:GetQueryResults
+              - athena:GetWorkGroup
+            Resource:
+              - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${ProjectName}-${Environment}'
+          - Sid: GlueCatalogRead
+            Effect: Allow
+            Action:
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:GetTable
+              - glue:GetTables
+              - glue:GetPartition
+              - glue:GetPartitions
+              - glue:BatchGetPartition
+            Resource:
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${ProjectName}_${Environment}'
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${ProjectName}_${Environment}/*'
+
+  PipelineCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ProjectName}/${Environment}/pipeline-credentials'
+      Description: !Sub 'Pipeline IAM user credentials for ${Environment}'
+      SecretString: !Sub |
+        {
+          "AccessKeyId": "${PipelineAccessKey}",
+          "SecretAccessKey": "${PipelineAccessKey.SecretAccessKey}"
+        }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  PipelineUserArn:
+    Description: ARN of the pipeline IAM user
+    Value: !GetAtt PipelineUser.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-PipelineUserArn'
+  PipelineCredentialsSecretArn:
+    Description: ARN of the Secrets Manager secret holding pipeline credentials
+    Value: !Ref PipelineCredentialsSecret
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-PipelineCredentialsSecretArn'

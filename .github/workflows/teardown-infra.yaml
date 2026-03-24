@@ -1,0 +1,66 @@
+name: Teardown Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (only dev allowed)'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+      confirmation:
+        description: 'Type DESTROY to confirm teardown'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  teardown:
+    name: Teardown CloudFormation Stacks
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirmation == 'DESTROY'
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirmation }}" != "DESTROY" ]; then
+            echo "ERROR: You must type DESTROY to confirm teardown."
+            exit 1
+          fi
+          if [ "${{ github.event.inputs.environment }}" != "dev" ]; then
+            echo "ERROR: Teardown via workflow is only allowed for the dev environment."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Teardown all stacks
+        run: |
+          chmod +x cloudformation/teardown-all.sh
+          echo "yes" | ./cloudformation/teardown-all.sh "${{ github.event.inputs.environment }}"
+
+  rejected:
+    name: Teardown Rejected
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirmation != 'DESTROY'
+    steps:
+      - name: Rejection notice
+        run: |
+          echo "Teardown was NOT executed."
+          echo "You entered: '${{ github.event.inputs.confirmation }}'"
+          echo "You must type exactly 'DESTROY' to confirm."
+          exit 1
