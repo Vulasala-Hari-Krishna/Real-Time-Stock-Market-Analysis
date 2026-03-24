@@ -48,19 +48,14 @@ def create_spark_session(app_name: str = "DailyAggregation") -> SparkSession:
     """
     settings = get_settings()
 
-    builder = (
-        SparkSession.builder.appName(app_name)
-        .config("spark.sql.shuffle.partitions", "8")
+    builder = SparkSession.builder.appName(app_name).config(
+        "spark.sql.shuffle.partitions", "8"
     )
 
     if settings.aws_access_key_id:
         builder = (
-            builder.config(
-                "spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id
-            )
-            .config(
-                "spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key
-            )
+            builder.config("spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id)
+            .config("spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key)
             .config(
                 "spark.hadoop.fs.s3a.endpoint",
                 f"s3.{settings.aws_default_region}.amazonaws.com",
@@ -77,6 +72,7 @@ def create_spark_session(app_name: str = "DailyAggregation") -> SparkSession:
 # ------------------------------------------------------------------
 # Silver layer reader
 # ------------------------------------------------------------------
+
 
 def read_silver_data(spark: SparkSession, silver_path: str) -> DataFrame:
     """Read silver-layer OHLCV Parquet data.
@@ -96,6 +92,7 @@ def read_silver_data(spark: SparkSession, silver_path: str) -> DataFrame:
 # ------------------------------------------------------------------
 # Technical indicators via Window functions
 # ------------------------------------------------------------------
+
 
 def add_daily_return(df: DataFrame) -> DataFrame:
     """Add daily return percentage column.
@@ -195,8 +192,18 @@ def add_rsi(df: DataFrame, period: int = RSI_PERIOD) -> DataFrame:
     )
 
     df = df.withColumn("_price_change", F.col("close") - F.lag("close", 1).over(w_prev))
-    df = df.withColumn("_gain", F.when(F.col("_price_change") > 0, F.col("_price_change")).otherwise(F.lit(0.0)))
-    df = df.withColumn("_loss", F.when(F.col("_price_change") < 0, -F.col("_price_change")).otherwise(F.lit(0.0)))
+    df = df.withColumn(
+        "_gain",
+        F.when(F.col("_price_change") > 0, F.col("_price_change")).otherwise(
+            F.lit(0.0)
+        ),
+    )
+    df = df.withColumn(
+        "_loss",
+        F.when(F.col("_price_change") < 0, -F.col("_price_change")).otherwise(
+            F.lit(0.0)
+        ),
+    )
 
     df = df.withColumn("_avg_gain", F.avg("_gain").over(w_rsi))
     df = df.withColumn("_avg_loss", F.avg("_loss").over(w_rsi))
@@ -207,7 +214,11 @@ def add_rsi(df: DataFrame, period: int = RSI_PERIOD) -> DataFrame:
             F.count("_price_change").over(w_rsi) >= period,
             F.when(
                 F.col("_avg_loss") > 0,
-                F.lit(100.0) - (F.lit(100.0) / (F.lit(1.0) + F.col("_avg_gain") / F.col("_avg_loss"))),
+                F.lit(100.0)
+                - (
+                    F.lit(100.0)
+                    / (F.lit(1.0) + F.col("_avg_gain") / F.col("_avg_loss"))
+                ),
             ).otherwise(F.lit(100.0)),
         ),
     )
@@ -236,9 +247,7 @@ def add_macd(df: DataFrame) -> DataFrame:
     )
 
     w_signal = (
-        Window.partitionBy("symbol")
-        .orderBy("date")
-        .rowsBetween(-8, Window.currentRow)
+        Window.partitionBy("symbol").orderBy("date").rowsBetween(-8, Window.currentRow)
     )
     df = df.withColumn(
         "macd_signal",
@@ -292,7 +301,11 @@ def add_sector(df: DataFrame) -> DataFrame:
         DataFrame with sector column.
     """
     mapping_expr = F.create_map(
-        *[item for pair in SECTOR_MAP.items() for item in (F.lit(pair[0]), F.lit(pair[1]))]
+        *[
+            item
+            for pair in SECTOR_MAP.items()
+            for item in (F.lit(pair[0]), F.lit(pair[1]))
+        ]
     )
     return df.withColumn("sector", mapping_expr[F.col("symbol")])
 
@@ -300,6 +313,7 @@ def add_sector(df: DataFrame) -> DataFrame:
 # ------------------------------------------------------------------
 # Signal generation
 # ------------------------------------------------------------------
+
 
 def generate_signals(df: DataFrame) -> DataFrame:
     """Generate trading signal column based on indicator thresholds.
@@ -358,7 +372,9 @@ def generate_signals(df: DataFrame) -> DataFrame:
     ).otherwise(F.lit(""))
 
     # Concatenate non-empty signals with comma separator
-    signals_array = F.array(overbought, oversold, golden_cross, death_cross, volume_spike)
+    signals_array = F.array(
+        overbought, oversold, golden_cross, death_cross, volume_spike
+    )
     non_empty = F.expr("filter(transform(signals_arr, x -> trim(x)), x -> x != '')")
 
     df = df.withColumn("signals_arr", signals_array)
@@ -371,6 +387,7 @@ def generate_signals(df: DataFrame) -> DataFrame:
 # ------------------------------------------------------------------
 # Sector performance
 # ------------------------------------------------------------------
+
 
 def compute_sector_performance(df: DataFrame) -> DataFrame:
     """Compute sector-level performance rollups.
@@ -388,7 +405,9 @@ def compute_sector_performance(df: DataFrame) -> DataFrame:
     w = Window.partitionBy("sector", "date").orderBy(F.col("daily_return_pct").desc())
 
     ranked = valid.withColumn("_rank_desc", F.row_number().over(w))
-    w_asc = Window.partitionBy("sector", "date").orderBy(F.col("daily_return_pct").asc())
+    w_asc = Window.partitionBy("sector", "date").orderBy(
+        F.col("daily_return_pct").asc()
+    )
     ranked = ranked.withColumn("_rank_asc", F.row_number().over(w_asc))
 
     avg_returns = valid.groupBy("sector", "date").agg(
@@ -412,6 +431,7 @@ def compute_sector_performance(df: DataFrame) -> DataFrame:
 # Correlation matrix
 # ------------------------------------------------------------------
 
+
 def compute_correlation_matrix(
     df: DataFrame,
     spark: SparkSession,
@@ -434,21 +454,25 @@ def compute_correlation_matrix(
     """
     import pandas as pd
 
-    pivot_df = df.filter(
-        F.col("daily_return_pct").isNotNull()
-    ).groupBy("date").pivot("symbol").agg(
-        F.first("daily_return_pct")
-    ).orderBy("date")
+    pivot_df = (
+        df.filter(F.col("daily_return_pct").isNotNull())
+        .groupBy("date")
+        .pivot("symbol")
+        .agg(F.first("daily_return_pct"))
+        .orderBy("date")
+    )
 
     # Convert to pandas for rolling correlation (aggregated, small)
     pdf = pivot_df.toPandas()
     if pdf.empty or pdf.shape[1] < 3:  # type: ignore[union-attr, attr-defined]  # date + at least 2 symbols
-        schema = StructType([
-            StructField("date", TimestampType()),
-            StructField("symbol_a", StringType()),
-            StructField("symbol_b", StringType()),
-            StructField("correlation", DoubleType()),
-        ])
+        schema = StructType(
+            [
+                StructField("date", TimestampType()),
+                StructField("symbol_a", StringType()),
+                StructField("symbol_b", StringType()),
+                StructField("correlation", DoubleType()),
+            ]
+        )
         return spark.createDataFrame([], schema)
 
     date_col = pdf["date"]  # type: ignore[index]
@@ -475,18 +499,21 @@ def compute_correlation_matrix(
             except KeyError:
                 continue
 
-    schema = StructType([
-        StructField("date", TimestampType()),
-        StructField("symbol_a", StringType()),
-        StructField("symbol_b", StringType()),
-        StructField("correlation", DoubleType()),
-    ])
+    schema = StructType(
+        [
+            StructField("date", TimestampType()),
+            StructField("symbol_a", StringType()),
+            StructField("symbol_b", StringType()),
+            StructField("correlation", DoubleType()),
+        ]
+    )
     return spark.createDataFrame(rows, schema)
 
 
 # ------------------------------------------------------------------
 # Full pipeline
 # ------------------------------------------------------------------
+
 
 def compute_daily_summaries(df: DataFrame) -> DataFrame:
     """Compute all daily summaries: indicators, signals, sector.
@@ -536,9 +563,7 @@ def run_daily_aggregation(
     }
 
 
-def write_gold_outputs(
-    outputs: dict[str, DataFrame], gold_path: str
-) -> None:
+def write_gold_outputs(outputs: dict[str, DataFrame], gold_path: str) -> None:
     """Write all gold-layer outputs to S3 as Parquet.
 
     Args:
@@ -547,11 +572,7 @@ def write_gold_outputs(
     """
     for name, df in outputs.items():
         path = f"{gold_path}/{name}"
-        (
-            df.write.mode("overwrite")
-            .option("compression", "snappy")
-            .parquet(path)
-        )
+        (df.write.mode("overwrite").option("compression", "snappy").parquet(path))
         logger.info("Wrote gold/%s to %s", name, path)
 
 

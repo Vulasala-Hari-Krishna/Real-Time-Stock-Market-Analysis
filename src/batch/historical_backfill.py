@@ -64,12 +64,8 @@ def create_spark_session(app_name: str = "HistoricalBackfill") -> SparkSession:
 
     if settings.aws_access_key_id:
         builder = (
-            builder.config(
-                "spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id
-            )
-            .config(
-                "spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key
-            )
+            builder.config("spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id)
+            .config("spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key)
             .config(
                 "spark.hadoop.fs.s3a.endpoint",
                 f"s3.{settings.aws_default_region}.amazonaws.com",
@@ -260,9 +256,7 @@ def run_backfill(
 
     for symbol in symbols:
         try:
-            results[symbol] = backfill_symbol(
-                spark, symbol, bronze_path, silver_path
-            )
+            results[symbol] = backfill_symbol(spark, symbol, bronze_path, silver_path)
         except Exception:
             logger.exception("Backfill failed for %s", symbol)
             results[symbol] = False

@@ -59,9 +59,18 @@ class TestFundamentalsSchema:
         """Schema contains all expected field names."""
         names = {f.name for f in FUNDAMENTALS_SCHEMA.fields}
         expected = {
-            "symbol", "market_cap", "pe_ratio", "forward_pe",
-            "dividend_yield", "eps", "beta", "fifty_two_week_high",
-            "fifty_two_week_low", "yf_sector", "industry", "retrieved_at",
+            "symbol",
+            "market_cap",
+            "pe_ratio",
+            "forward_pe",
+            "dividend_yield",
+            "eps",
+            "beta",
+            "fifty_two_week_high",
+            "fifty_two_week_low",
+            "yf_sector",
+            "industry",
+            "retrieved_at",
         }
         assert names == expected
 
@@ -195,9 +204,7 @@ class TestFundamentalsToSpark:
 
         fundamentals_to_spark(mock_spark, [])
 
-        mock_spark.createDataFrame.assert_called_once_with(
-            [], FUNDAMENTALS_SCHEMA
-        )
+        mock_spark.createDataFrame.assert_called_once_with([], FUNDAMENTALS_SCHEMA)
 
     def test_fills_missing_columns(self) -> None:
         """Records missing schema columns get None-filled."""
@@ -280,9 +287,7 @@ class TestWriteFundamentalsGold:
 
         mock_write.mode.assert_called_with("overwrite")
         mock_write.option.assert_called_with("compression", "snappy")
-        mock_write.parquet.assert_called_once_with(
-            "s3a://bucket/gold/fundamentals"
-        )
+        mock_write.parquet.assert_called_once_with("s3a://bucket/gold/fundamentals")
 
 
 class TestWriteEnrichedGold:
@@ -300,9 +305,7 @@ class TestWriteEnrichedGold:
 
         mock_write.mode.assert_called_with("overwrite")
         mock_write.option.assert_called_with("compression", "snappy")
-        mock_write.parquet.assert_called_once_with(
-            "s3a://bucket/gold/enriched_prices"
-        )
+        mock_write.parquet.assert_called_once_with("s3a://bucket/gold/enriched_prices")
 
 
 # ---------------------------------------------------------------------------
@@ -332,9 +335,7 @@ class TestRunFundamentalEnrichment:
         enriched_df = MagicMock()
         mock_enrich.return_value = enriched_df
 
-        result = run_fundamental_enrichment(
-            mock_spark, mock_price_df, symbols=["AAPL"]
-        )
+        result = run_fundamental_enrichment(mock_spark, mock_price_df, symbols=["AAPL"])
 
         assert "fundamentals" in result
         assert "enriched" in result

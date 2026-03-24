@@ -26,21 +26,30 @@ class TestGenerateS3Key:
         dt = datetime(2024, 3, 15, 14, 30, 0, tzinfo=timezone.utc)
         key = generate_s3_key("bronze", "stock_ticks", partition_date=dt, symbol="AAPL")
 
-        assert key == "bronze/stock_ticks/year=2024/month=03/day=15/AAPL_20240315T143000Z.json"
+        assert (
+            key
+            == "bronze/stock_ticks/year=2024/month=03/day=15/AAPL_20240315T143000Z.json"
+        )
 
     def test_silver_key_with_symbol(self) -> None:
         """Generates a silver-layer key with .parquet extension."""
         dt = datetime(2024, 3, 15, 14, 30, 0, tzinfo=timezone.utc)
         key = generate_s3_key("silver", "daily_ohlcv", partition_date=dt, symbol="MSFT")
 
-        assert key == "silver/daily_ohlcv/year=2024/month=03/day=15/MSFT_20240315T143000Z.parquet"
+        assert (
+            key
+            == "silver/daily_ohlcv/year=2024/month=03/day=15/MSFT_20240315T143000Z.parquet"
+        )
 
     def test_gold_key_without_symbol(self) -> None:
         """Generates a gold-layer key without symbol in filename."""
         dt = datetime(2024, 12, 1, 0, 0, 0, tzinfo=timezone.utc)
         key = generate_s3_key("gold", "daily_summary", partition_date=dt)
 
-        assert key == "gold/daily_summary/year=2024/month=12/day=01/20241201T000000Z.parquet"
+        assert (
+            key
+            == "gold/daily_summary/year=2024/month=12/day=01/20241201T000000Z.parquet"
+        )
 
     def test_default_date_uses_now(self) -> None:
         """Uses current UTC time when no partition_date is given."""
@@ -186,7 +195,9 @@ class TestReadParquetFromS3:
         import io
 
         # Create a real parquet buffer
-        df_original = pd.DataFrame({"symbol": ["AAPL", "MSFT"], "price": [178.5, 400.0]})
+        df_original = pd.DataFrame(
+            {"symbol": ["AAPL", "MSFT"], "price": [178.5, 400.0]}
+        )
         buffer = io.BytesIO()
         df_original.to_parquet(buffer, index=False, engine="pyarrow")
         buffer.seek(0)

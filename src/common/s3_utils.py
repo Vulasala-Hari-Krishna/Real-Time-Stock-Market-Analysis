@@ -48,7 +48,9 @@ def upload_json_to_s3(
     try:
         client = get_s3_client(region)
         body = json.dumps(data, default=str).encode("utf-8")
-        client.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
+        client.put_object(
+            Bucket=bucket, Key=key, Body=body, ContentType="application/json"
+        )
         logger.info("Uploaded JSON to s3://%s/%s (%d bytes)", bucket, key, len(body))
         return True
     except ClientError as exc:
@@ -155,7 +157,11 @@ def generate_s3_key(
     ]
 
     extension = "json" if layer == "bronze" else "parquet"
-    filename = f"{symbol}_{timestamp_str}.{extension}" if symbol else f"{timestamp_str}.{extension}"
+    filename = (
+        f"{symbol}_{timestamp_str}.{extension}"
+        if symbol
+        else f"{timestamp_str}.{extension}"
+    )
     parts.append(filename)
 
     return "/".join(parts)

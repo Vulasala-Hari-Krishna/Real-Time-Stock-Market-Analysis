@@ -28,6 +28,7 @@ from src.batch.historical_backfill import (
 # _FakeColumn / _make_fake_F — reuse the established mock pattern
 # ---------------------------------------------------------------------------
 
+
 class _FakeColumn:
     """Mimics PySpark Column operator protocol for unit tests."""
 
@@ -60,7 +61,9 @@ def _make_fake_F() -> MagicMock:
     """Build a mock ``pyspark.sql.functions``."""
     mock_F = MagicMock()
     mock_F.col.return_value = _FakeColumn()
-    mock_F.when.return_value = MagicMock(otherwise=MagicMock(return_value=_FakeColumn()))
+    mock_F.when.return_value = MagicMock(
+        otherwise=MagicMock(return_value=_FakeColumn())
+    )
     mock_F.lit.return_value = _FakeColumn()
     mock_F.year.return_value = _FakeColumn()
     mock_F.date_format.return_value = _FakeColumn()
@@ -125,7 +128,16 @@ class TestOHLCVSchema:
     def test_required_fields(self) -> None:
         """Schema contains expected field names."""
         names = {f.name for f in OHLCV_SCHEMA.fields}
-        expected = {"symbol", "date", "open", "high", "low", "close", "volume", "source"}
+        expected = {
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "source",
+        }
         assert names == expected
 
 

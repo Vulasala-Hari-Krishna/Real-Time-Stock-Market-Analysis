@@ -69,7 +69,9 @@ def _make_fake_F() -> MagicMock:
     mock_F = MagicMock()
     mock_F.col.return_value = _FakeColumn()
     # F.when(...).otherwise(...) → _FakeColumn
-    mock_F.when.return_value = MagicMock(otherwise=MagicMock(return_value=_FakeColumn()))
+    mock_F.when.return_value = MagicMock(
+        otherwise=MagicMock(return_value=_FakeColumn())
+    )
     mock_F.lit.return_value = _FakeColumn()
     mock_F.avg.return_value = _FakeColumn()
     mock_F.from_json.return_value = _FakeColumn()

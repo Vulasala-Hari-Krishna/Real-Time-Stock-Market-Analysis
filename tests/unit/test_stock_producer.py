@@ -117,9 +117,7 @@ class TestFetchGlobalQuote:
 
     @patch("src.producers.stock_producer.requests.get")
     @patch("src.producers.stock_producer.time.sleep")
-    def test_timeout_retries(
-        self, mock_sleep: MagicMock, mock_get: MagicMock
-    ) -> None:
+    def test_timeout_retries(self, mock_sleep: MagicMock, mock_get: MagicMock) -> None:
         """Retries on timeouts."""
         mock_get.side_effect = Timeout("Request timed out")
 

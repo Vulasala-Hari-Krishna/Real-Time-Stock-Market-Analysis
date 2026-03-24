@@ -37,15 +37,17 @@ pytestmark = pytest.mark.integration
 @pytest.fixture()
 def sample_ohlcv_df() -> pd.DataFrame:
     """A small OHLCV DataFrame for round-trip testing."""
-    return pd.DataFrame({
-        "symbol": ["AAPL", "AAPL", "MSFT"],
-        "date": [date(2024, 3, 13), date(2024, 3, 14), date(2024, 3, 14)],
-        "open": [175.0, 176.5, 420.0],
-        "high": [178.0, 179.0, 425.0],
-        "low": [174.0, 175.0, 418.0],
-        "close": [177.5, 178.0, 422.0],
-        "volume": [52_000_000, 48_000_000, 30_000_000],
-    })
+    return pd.DataFrame(
+        {
+            "symbol": ["AAPL", "AAPL", "MSFT"],
+            "date": [date(2024, 3, 13), date(2024, 3, 14), date(2024, 3, 14)],
+            "open": [175.0, 176.5, 420.0],
+            "high": [178.0, 179.0, 425.0],
+            "low": [174.0, 175.0, 418.0],
+            "close": [177.5, 178.0, 422.0],
+            "volume": [52_000_000, 48_000_000, 30_000_000],
+        }
+    )
 
 
 @pytest.fixture()
@@ -91,7 +93,9 @@ class TestJsonUpload:
 
     @patch("src.common.s3_utils.get_s3_client")
     def test_upload_json_success(
-        self, mock_get_client: MagicMock, sample_json_data: dict,
+        self,
+        mock_get_client: MagicMock,
+        sample_json_data: dict,
     ) -> None:
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -102,7 +106,9 @@ class TestJsonUpload:
 
     @patch("src.common.s3_utils.get_s3_client")
     def test_upload_json_failure_returns_false(
-        self, mock_get_client: MagicMock, sample_json_data: dict,
+        self,
+        mock_get_client: MagicMock,
+        sample_json_data: dict,
     ) -> None:
         mock_client = MagicMock()
         mock_client.put_object.side_effect = ClientError(
@@ -123,12 +129,16 @@ class TestParquetUpload:
 
     @patch("src.common.s3_utils.get_s3_client")
     def test_upload_parquet_success(
-        self, mock_get_client: MagicMock, sample_ohlcv_df: pd.DataFrame,
+        self,
+        mock_get_client: MagicMock,
+        sample_ohlcv_df: pd.DataFrame,
     ) -> None:
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
 
-        result = upload_parquet_to_s3(sample_ohlcv_df, "test-bucket", "silver/test.parquet")
+        result = upload_parquet_to_s3(
+            sample_ohlcv_df, "test-bucket", "silver/test.parquet"
+        )
         assert result is True
         mock_client.put_object.assert_called_once()
         call_kwargs = mock_client.put_object.call_args
@@ -139,7 +149,9 @@ class TestParquetUpload:
 
     @patch("src.common.s3_utils.get_s3_client")
     def test_upload_parquet_preserves_schema(
-        self, mock_get_client: MagicMock, sample_ohlcv_df: pd.DataFrame,
+        self,
+        mock_get_client: MagicMock,
+        sample_ohlcv_df: pd.DataFrame,
     ) -> None:
         captured_body = None
         mock_client = MagicMock()
@@ -170,7 +182,9 @@ class TestParquetRead:
 
     @patch("src.common.s3_utils.get_s3_client")
     def test_read_parquet_returns_dataframe(
-        self, mock_get_client: MagicMock, sample_ohlcv_df: pd.DataFrame,
+        self,
+        mock_get_client: MagicMock,
+        sample_ohlcv_df: pd.DataFrame,
     ) -> None:
         # Create real Parquet bytes from the sample
         buf = io.BytesIO()
@@ -191,7 +205,8 @@ class TestParquetRead:
 
     @patch("src.common.s3_utils.get_s3_client")
     def test_read_parquet_missing_key_returns_none(
-        self, mock_get_client: MagicMock,
+        self,
+        mock_get_client: MagicMock,
     ) -> None:
         mock_client = MagicMock()
         mock_client.get_object.side_effect = ClientError(
@@ -205,7 +220,9 @@ class TestParquetRead:
 
     @patch("src.common.s3_utils.get_s3_client")
     def test_round_trip_preserves_data(
-        self, mock_get_client: MagicMock, sample_ohlcv_df: pd.DataFrame,
+        self,
+        mock_get_client: MagicMock,
+        sample_ohlcv_df: pd.DataFrame,
     ) -> None:
         """Write → read round-trip preserves all values."""
         stored = {}

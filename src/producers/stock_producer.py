@@ -167,7 +167,12 @@ def backup_to_s3(data: dict, symbol: str, settings: Settings) -> None:
             key=key,
             region=settings.aws_default_region,
         )
-        logger.debug("Backed up raw data for %s to s3://%s/%s", symbol, settings.s3_bucket_name, key)
+        logger.debug(
+            "Backed up raw data for %s to s3://%s/%s",
+            symbol,
+            settings.s3_bucket_name,
+            key,
+        )
     except Exception as exc:
         logger.warning("S3 backup failed for %s (non-fatal): %s", symbol, exc)
 

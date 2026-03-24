@@ -31,6 +31,7 @@ from src.batch.daily_aggregation import (
 # _FakeColumn / _make_fake_F – established mock pattern
 # ---------------------------------------------------------------------------
 
+
 class _FakeColumn:
     """Mimics PySpark Column operator protocol for unit tests."""
 
@@ -133,7 +134,9 @@ def _make_chainable_df() -> MagicMock:
     df.filter.return_value = df
     df.select.return_value = df
     df.groupBy.return_value.agg.return_value = df
-    df.groupBy.return_value.pivot.return_value.agg.return_value.orderBy.return_value = df
+    df.groupBy.return_value.pivot.return_value.agg.return_value.orderBy.return_value = (
+        df
+    )
     df.join.return_value = df
     df.orderBy.return_value = df
     df.columns = ["symbol", "date", "close", "volume"]
@@ -302,7 +305,9 @@ class TestAddVolumeMetrics:
 
     @patch("src.batch.daily_aggregation.F", new_callable=_make_fake_F)
     @patch("src.batch.daily_aggregation.Window")
-    def test_adds_volume_vs_avg(self, mock_window: MagicMock, mock_f: MagicMock) -> None:
+    def test_adds_volume_vs_avg(
+        self, mock_window: MagicMock, mock_f: MagicMock
+    ) -> None:
         """Adds volume_vs_avg column."""
         df = _make_chainable_df()
 
@@ -341,7 +346,9 @@ class TestGenerateSignals:
 
     @patch("src.batch.daily_aggregation.F", new_callable=_make_fake_F)
     @patch("src.batch.daily_aggregation.Window")
-    def test_adds_signals_column(self, mock_window: MagicMock, mock_f: MagicMock) -> None:
+    def test_adds_signals_column(
+        self, mock_window: MagicMock, mock_f: MagicMock
+    ) -> None:
         """Adds signals column and drops intermediate signals_arr."""
         df = _make_chainable_df()
 
@@ -363,7 +370,9 @@ class TestComputeSectorPerformance:
 
     @patch("src.batch.daily_aggregation.F", new_callable=_make_fake_F)
     @patch("src.batch.daily_aggregation.Window")
-    def test_filters_and_groups(self, mock_window: MagicMock, mock_f: MagicMock) -> None:
+    def test_filters_and_groups(
+        self, mock_window: MagicMock, mock_f: MagicMock
+    ) -> None:
         """Filters null returns/sectors and groups by sector+date."""
         df = _make_chainable_df()
         mock_grouped = MagicMock()
@@ -381,7 +390,9 @@ class TestComputeSectorPerformance:
 
     @patch("src.batch.daily_aggregation.F", new_callable=_make_fake_F)
     @patch("src.batch.daily_aggregation.Window")
-    def test_join_top_bottom_performers(self, mock_window: MagicMock, mock_f: MagicMock) -> None:
+    def test_join_top_bottom_performers(
+        self, mock_window: MagicMock, mock_f: MagicMock
+    ) -> None:
         """Result joins top and bottom performers."""
         df = _make_chainable_df()
         df.columns = ["symbol", "date", "daily_return_pct", "sector"]
@@ -493,11 +504,13 @@ class TestComputeCorrelationMatrix:
 
         n = 35
         dates = pd.date_range("2024-01-01", periods=n, freq="B")
-        ordered.toPandas.return_value = pd.DataFrame({
-            "date": dates,
-            "A": [float(i) for i in range(n)],
-            "B": [float(i) * 0.8 for i in range(n)],
-        })
+        ordered.toPandas.return_value = pd.DataFrame(
+            {
+                "date": dates,
+                "A": [float(i) for i in range(n)],
+                "B": [float(i) * 0.8 for i in range(n)],
+            }
+        )
         result_df = MagicMock()
         mock_spark.createDataFrame.return_value = result_df
 
@@ -644,9 +657,7 @@ class TestWriteGoldOutputs:
         outputs = {"daily_summaries": df1, "sector_performance": df2}
         write_gold_outputs(outputs, "s3a://bucket/gold")
 
-        mock_write1.parquet.assert_called_once_with(
-            "s3a://bucket/gold/daily_summaries"
-        )
+        mock_write1.parquet.assert_called_once_with("s3a://bucket/gold/daily_summaries")
         mock_write2.parquet.assert_called_once_with(
             "s3a://bucket/gold/sector_performance"
         )

@@ -66,16 +66,15 @@ def create_spark_session(app_name: str = "StockStreamConsumer") -> SparkSession:
     # S3 config if AWS credentials are available
     if settings.aws_access_key_id:
         builder = (
-            builder.config(
-                "spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id
+            builder.config("spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id)
+            .config("spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key)
+            .config(
+                "spark.hadoop.fs.s3a.endpoint",
+                f"s3.{settings.aws_default_region}.amazonaws.com",
             )
             .config(
-                "spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key
+                "spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"
             )
-            .config(
-                "spark.hadoop.fs.s3a.endpoint", f"s3.{settings.aws_default_region}.amazonaws.com"
-            )
-            .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
         )
 
     return builder.getOrCreate()
@@ -112,7 +111,9 @@ def deserialize_ticks(raw_df: DataFrame) -> DataFrame:
         DataFrame with parsed StockTick columns.
     """
     return (
-        raw_df.selectExpr("CAST(value AS STRING) AS json_value", "timestamp AS kafka_timestamp")
+        raw_df.selectExpr(
+            "CAST(value AS STRING) AS json_value", "timestamp AS kafka_timestamp"
+        )
         .select(
             F.from_json(F.col("json_value"), STOCK_TICK_SCHEMA).alias("tick"),
             F.col("kafka_timestamp"),
@@ -153,9 +154,8 @@ def deduplicate_ticks(df: DataFrame) -> DataFrame:
     Returns:
         Deduplicated streaming DataFrame.
     """
-    return (
-        df.withWatermark("timestamp", WATERMARK_DURATION)
-        .dropDuplicates(["symbol", "timestamp"])
+    return df.withWatermark("timestamp", WATERMARK_DURATION).dropDuplicates(
+        ["symbol", "timestamp"]
     )
 
 
@@ -212,9 +212,7 @@ def add_volume_anomaly_flag(df: DataFrame) -> DataFrame:
     Returns:
         DataFrame with an added ``volume_anomaly`` boolean column.
     """
-    avg_volume = df.groupBy("symbol").agg(
-        F.avg("volume").alias("avg_volume")
-    )
+    avg_volume = df.groupBy("symbol").agg(F.avg("volume").alias("avg_volume"))
     return (
         df.join(avg_volume, on="symbol", how="left")
         .withColumn(

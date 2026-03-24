@@ -72,19 +72,14 @@ def create_spark_session(
     """
     settings = get_settings()
 
-    builder = (
-        SparkSession.builder.appName(app_name)
-        .config("spark.sql.shuffle.partitions", "8")
+    builder = SparkSession.builder.appName(app_name).config(
+        "spark.sql.shuffle.partitions", "8"
     )
 
     if settings.aws_access_key_id:
         builder = (
-            builder.config(
-                "spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id
-            )
-            .config(
-                "spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key
-            )
+            builder.config("spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id)
+            .config("spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key)
             .config(
                 "spark.hadoop.fs.s3a.endpoint",
                 f"s3.{settings.aws_default_region}.amazonaws.com",

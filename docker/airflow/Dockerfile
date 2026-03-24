@@ -1,4 +1,4 @@
-FROM apache/airflow:2.8.1
+FROM apache/airflow:2.8.1-python3.11
 
 LABEL maintainer="stock-market-pipeline"
 LABEL description="Airflow with project dependencies for batch orchestration"
