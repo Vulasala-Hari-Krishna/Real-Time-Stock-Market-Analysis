@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Glue Data Catalog for the stock market analytics pipeline.
+  Creates a Glue database and tables for bronze (JSON), silver (Parquet),
+  and gold (Parquet) layers of the medallion architecture.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+    Description: Deployment environment
+  ProjectName:
+    Type: String
+    Default: stock-market-pipeline
+    Description: Project name used in resource naming
+
+Resources:
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub '${ProjectName}_${Environment}'
+        Description: !Sub 'Stock market data lake catalog (${Environment})'
+
+  BronzeStockTicksTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: bronze_stock_ticks
+        Description: Raw stock tick data from Alpha Vantage API (JSON)
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+        StorageDescriptor:
+          Location: !Sub
+            - 's3://${BucketName}/bronze/stock_ticks/'
+            - BucketName: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketName'
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          Columns:
+            - Name: symbol
+              Type: string
+            - Name: price
+              Type: double
+            - Name: volume
+              Type: bigint
+            - Name: timestamp
+              Type: timestamp
+            - Name: source
+              Type: string
+
+  SilverDailyOhlcvTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: silver_daily_ohlcv
+        Description: Cleaned daily OHLCV data with indicators (Parquet)
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+        StorageDescriptor:
+          Location: !Sub
+            - 's3://${BucketName}/silver/daily_ohlcv/'
+            - BucketName: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketName'
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - Name: symbol
+              Type: string
+            - Name: date
+              Type: timestamp
+            - Name: open
+              Type: double
+            - Name: high
+              Type: double
+            - Name: low
+              Type: double
+            - Name: close
+              Type: double
+            - Name: volume
+              Type: bigint
+            - Name: source
+              Type: string
+            - Name: sma_20
+              Type: double
+            - Name: sma_50
+              Type: double
+            - Name: ema_12
+              Type: double
+            - Name: ema_26
+              Type: double
+            - Name: rsi_14
+              Type: double
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+
+  GoldDailySummaryTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: gold_daily_summary
+        Description: Aggregated daily summary per stock (Parquet)
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+        StorageDescriptor:
+          Location: !Sub
+            - 's3://${BucketName}/gold/daily_summary/'
+            - BucketName: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketName'
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - Name: symbol
+              Type: string
+            - Name: date
+              Type: timestamp
+            - Name: open
+              Type: double
+            - Name: high
+              Type: double
+            - Name: low
+              Type: double
+            - Name: close
+              Type: double
+            - Name: volume
+              Type: bigint
+            - Name: daily_return_pct
+              Type: double
+            - Name: sma_20
+              Type: double
+            - Name: sma_50
+              Type: double
+            - Name: rsi_14
+              Type: double
+            - Name: volume_anomaly
+              Type: boolean
+            - Name: sector
+              Type: string
+
+Outputs:
+  GlueDatabaseName:
+    Description: Name of the Glue database
+    Value: !Ref GlueDatabase
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-GlueDatabaseName'

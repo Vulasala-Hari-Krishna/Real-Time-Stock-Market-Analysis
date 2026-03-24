@@ -1,0 +1,48 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Athena workgroup for the stock market analytics pipeline.
+  Creates a named workgroup with query results stored in the dedicated
+  Athena results S3 bucket.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+    Description: Deployment environment
+  ProjectName:
+    Type: String
+    Default: stock-market-pipeline
+    Description: Project name used in resource naming
+
+Resources:
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}'
+      Description: !Sub 'Workgroup for stock market analytics (${Environment})'
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub
+            - 's3://${BucketName}/query-results/'
+            - BucketName: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-AthenaResultsBucketName'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  AthenaWorkgroupName:
+    Description: Name of the Athena workgroup
+    Value: !Ref AthenaWorkgroup
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-AthenaWorkgroupName'
