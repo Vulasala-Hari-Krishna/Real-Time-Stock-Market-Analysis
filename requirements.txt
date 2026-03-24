@@ -1,6 +1,5 @@
 pyspark==3.5.3
 kafka-python==2.0.2
-apache-airflow==2.8.4
 yfinance==0.2.36
 requests==2.31.0
 pydantic==2.6.4

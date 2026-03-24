@@ -90,6 +90,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Create dummy .env for compose validation
+        run: cp .env.example .env
+
       - name: Verify Docker Compose config
         run: |
           if [ -f docker/docker-compose.yaml ]; then
