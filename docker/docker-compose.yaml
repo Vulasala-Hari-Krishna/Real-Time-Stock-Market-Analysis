@@ -77,7 +77,7 @@ services:
         condition: service_completed_successfully
 
   spark-master:
-    image: bitnami/spark:3.5
+    image: apache/spark:3.5.3-python3
     container_name: stock-spark-master
     hostname: spark-master
     restart: unless-stopped
@@ -85,31 +85,30 @@ services:
       - "8080:8080"
       - "7077:7077"
     environment:
-      SPARK_MODE: master
       SPARK_MASTER_HOST: spark-master
       SPARK_MASTER_PORT: 7077
       SPARK_MASTER_WEBUI_PORT: 8080
     volumes:
-      - spark-data:/opt/bitnami/spark/data
+      - spark-data:/opt/spark/work-dir
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
       interval: 15s
       timeout: 10s
       retries: 5
 
   spark-worker:
-    image: bitnami/spark:3.5
+    image: apache/spark:3.5.3-python3
     container_name: stock-spark-worker
     hostname: spark-worker
     restart: unless-stopped
     ports:
       - "8082:8082"
     environment:
-      SPARK_MODE: worker
-      SPARK_MASTER_URL: spark://spark-master:7077
       SPARK_WORKER_MEMORY: 2g
       SPARK_WORKER_CORES: 2
       SPARK_WORKER_WEBUI_PORT: 8082
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
     depends_on:
       spark-master:
         condition: service_healthy
@@ -158,8 +157,8 @@ services:
 
   airflow-webserver:
     build:
-      context: ../docker/airflow
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/airflow/Dockerfile
     container_name: stock-airflow-webserver
     restart: unless-stopped
     ports:
@@ -194,8 +193,8 @@ services:
 
   airflow-scheduler:
     build:
-      context: ../docker/airflow
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/airflow/Dockerfile
     container_name: stock-airflow-scheduler
     restart: unless-stopped
     env_file:

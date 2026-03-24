@@ -1,8 +1,8 @@
-FROM bitnami/spark:3.5
+FROM apache/spark:3.5.3-python3
 
 USER root
 
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --root-user-action=ignore \
     boto3==1.34.62 \
     pydantic==2.6.4 \
     pydantic-settings==2.2.1 \
@@ -13,6 +13,6 @@ WORKDIR /app
 
 COPY src/ src/
 
-USER 1001
+USER 185
 
 ENTRYPOINT ["spark-submit"]

@@ -5,5 +5,6 @@ LABEL description="Airflow with project dependencies for batch orchestration"
 
 USER airflow
 
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY docker/airflow/requirements.txt /tmp/requirements.txt
+RUN pip uninstall -y aiobotocore && \
+    pip install --no-cache-dir -r /tmp/requirements.txt

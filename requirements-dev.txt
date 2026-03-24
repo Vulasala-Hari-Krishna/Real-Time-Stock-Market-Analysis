@@ -4,4 +4,5 @@ pytest-mock==3.14.0
 ruff==0.3.4
 black==24.3.0
 mypy==1.9.0
+types-requests==2.31.0.20240311
 cfn-lint==0.86.4

@@ -9,7 +9,7 @@ RUN groupadd --gid 1000 appuser \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --root-user-action=ignore \
     kafka-python==2.0.2 \
     requests==2.31.0 \
     pydantic==2.6.4 \

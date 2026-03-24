@@ -9,7 +9,7 @@ RUN groupadd --gid 1000 appuser \
 WORKDIR /app
 
 COPY dashboards/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir --root-user-action=ignore -r /app/requirements.txt
 
 COPY dashboards/ /app/dashboards/
 COPY src/ /app/src/
