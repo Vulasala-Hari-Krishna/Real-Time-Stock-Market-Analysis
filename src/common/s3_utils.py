@@ -7,6 +7,7 @@ partitioned S3 keys following the medallion architecture.
 import io
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
 import boto3
@@ -16,15 +17,17 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 
-def get_s3_client(region: str = "us-east-1") -> boto3.client:
+def get_s3_client(region: str | None = None) -> boto3.client:
     """Create and return a boto3 S3 client.
 
     Args:
-        region: AWS region name.
+        region: AWS region name. Defaults to AWS_DEFAULT_REGION env var.
 
     Returns:
         A boto3 S3 client.
     """
+    if region is None:
+        region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
     return boto3.client("s3", region_name=region)
 
 
@@ -32,7 +35,7 @@ def upload_json_to_s3(
     data: dict | list,
     bucket: str,
     key: str,
-    region: str = "us-east-1",
+    region: str | None = None,
 ) -> bool:
     """Upload a JSON-serializable object to S3.
 
@@ -62,7 +65,7 @@ def upload_parquet_to_s3(
     df: pd.DataFrame,
     bucket: str,
     key: str,
-    region: str = "us-east-1",
+    region: str | None = None,
 ) -> bool:
     """Upload a pandas DataFrame as Parquet to S3.
 
@@ -96,7 +99,7 @@ def upload_parquet_to_s3(
 def read_parquet_from_s3(
     bucket: str,
     key: str,
-    region: str = "us-east-1",
+    region: str | None = None,
 ) -> pd.DataFrame | None:
     """Read a Parquet file from S3 into a pandas DataFrame.
 

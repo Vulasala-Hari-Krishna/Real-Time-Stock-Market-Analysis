@@ -14,13 +14,18 @@ on:
         description: 'Type DESTROY to confirm teardown'
         required: true
         type: string
+      aws-region:
+        description: 'AWS region for teardown'
+        required: true
+        default: 'us-east-1'
+        type: string
 
 permissions:
   id-token: write
   contents: read
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ${{ github.event.inputs.aws-region || vars.AWS_REGION || 'us-east-1' }}
 
 jobs:
   teardown:
