@@ -98,21 +98,25 @@ Resources:
               - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${ProjectName}_${Environment}'
               - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${ProjectName}_${Environment}/*'
 
-  PipelineCredentialsSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: !Sub '${ProjectName}/${Environment}/pipeline-credentials'
-      Description: !Sub 'Pipeline IAM user credentials for ${Environment}'
-      SecretString: !Sub |
-        {
-          "AccessKeyId": "${PipelineAccessKey}",
-          "SecretAccessKey": "${PipelineAccessKey.SecretAccessKey}"
-        }
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
+  # ------------------------------------------------------------------
+  # Secrets Manager (optional — uncomment to store credentials in AWS
+  # instead of the local .env file. Costs ~$0.40/month per secret.)
+  # ------------------------------------------------------------------
+  # PipelineCredentialsSecret:
+  #   Type: AWS::SecretsManager::Secret
+  #   Properties:
+  #     Name: !Sub '${ProjectName}/${Environment}/pipeline-credentials'
+  #     Description: !Sub 'Pipeline IAM user credentials for ${Environment}'
+  #     SecretString: !Sub |
+  #       {
+  #         "AccessKeyId": "${PipelineAccessKey}",
+  #         "SecretAccessKey": "${PipelineAccessKey.SecretAccessKey}"
+  #       }
+  #     Tags:
+  #       - Key: Project
+  #         Value: !Ref ProjectName
+  #       - Key: Environment
+  #         Value: !Ref Environment
 
 Outputs:
   PipelineUserArn:
@@ -120,8 +124,17 @@ Outputs:
     Value: !GetAtt PipelineUser.Arn
     Export:
       Name: !Sub '${ProjectName}-${Environment}-PipelineUserArn'
-  PipelineCredentialsSecretArn:
-    Description: ARN of the Secrets Manager secret holding pipeline credentials
-    Value: !Ref PipelineCredentialsSecret
-    Export:
-      Name: !Sub '${ProjectName}-${Environment}-PipelineCredentialsSecretArn'
+  PipelineAccessKeyId:
+    Description: Access key ID for the pipeline IAM user (put this in .env as AWS_ACCESS_KEY_ID)
+    Value: !Ref PipelineAccessKey
+  PipelineSecretAccessKey:
+    Description: Secret access key for the pipeline IAM user (put this in .env as AWS_SECRET_ACCESS_KEY)
+    Value: !GetAtt PipelineAccessKey.SecretAccessKey
+  # ------------------------------------------------------------------
+  # Uncomment if you re-enable PipelineCredentialsSecret above
+  # ------------------------------------------------------------------
+  # PipelineCredentialsSecretArn:
+  #   Description: ARN of the Secrets Manager secret holding pipeline credentials
+  #   Value: !Ref PipelineCredentialsSecret
+  #   Export:
+  #     Name: !Sub '${ProjectName}-${Environment}-PipelineCredentialsSecretArn'

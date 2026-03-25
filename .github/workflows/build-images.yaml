@@ -1,14 +1,7 @@
 name: Build Docker Images
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'docker/**'
-      - 'src/**'
-      - 'dags/**'
-      - 'dashboards/**'
-      - 'requirements.txt'
+  workflow_dispatch:
 
 permissions:
   contents: read
