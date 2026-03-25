@@ -1,7 +1,7 @@
 # Real-Time Stock Market Analytics Pipeline
 
-[![CI](https://github.com/YOUR_USERNAME/Real-Time-Stock-Market-Analysis/actions/workflows/ci.yaml/badge.svg)](https://github.com/YOUR_USERNAME/Real-Time-Stock-Market-Analysis/actions/workflows/ci.yaml)
-![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
+[![CI](https://github.com/Vulasala-Hari-Krishna/Real-Time-Stock-Market-Analysis/actions/workflows/ci.yaml/badge.svg)](https://github.com/Vulasala-Hari-Krishna/Real-Time-Stock-Market-Analysis/actions/workflows/ci.yaml)
+![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An end-to-end, real-time stock market analytics platform that ingests live
@@ -43,30 +43,30 @@ deployed through **CloudFormation**.
 
 ## Tech Stack
 
-| Layer             | Technology                          |
-|-------------------|-------------------------------------|
-| Ingestion         | Alpha Vantage API, Kafka 7.5        |
-| Stream Processing | Spark Structured Streaming 3.5      |
-| Batch Processing  | PySpark 3.5                         |
-| Orchestration     | Apache Airflow 2.8                  |
-| Storage           | AWS S3 (medallion architecture)     |
-| Catalog / Query   | AWS Glue, Amazon Athena             |
-| Dashboard         | Streamlit 1.31, Plotly 5.19         |
-| Notebooks         | Databricks (PySpark)                |
-| Infrastructure    | AWS CloudFormation, Docker Compose  |
-| CI/CD             | GitHub Actions                      |
-| Language          | Python 3.12                         |
+| Layer             | Technology                         |
+|-------------------|------------------------------------|
+| Ingestion         | Alpha Vantage API, Kafka 7.5       |
+| Stream Processing | Spark Structured Streaming 3.5     |
+| Batch Processing  | PySpark 3.5                        |
+| Orchestration     | Apache Airflow 2.8                 |
+| Storage           | AWS S3 (medallion architecture)    |
+| Catalog / Query   | AWS Glue, Amazon Athena            |
+| Dashboard         | Streamlit 1.32, Plotly 5.19        |
+| Notebooks         | Databricks (PySpark)               |
+| Infrastructure    | AWS CloudFormation, Docker Compose |
+| CI/CD             | GitHub Actions                     |
+| Language          | Python 3.11                        |
 
 ---
 
 ## Prerequisites
 
-| Tool        | Version  | Purpose                              |
-|-------------|----------|--------------------------------------|
-| Docker      | 24+      | Containerised services               |
-| Python      | 3.12+    | Local development & testing          |
-| AWS CLI     | 2.x      | Deploy CloudFormation / S3 access    |
-| API Key     | —        | Free Alpha Vantage key ([get one](https://www.alphavantage.co/support/#api-key)) |
+| Tool        | Version | Purpose                              |
+|-------------|---------|--------------------------------------|
+| Docker      | 24+     | Containerised services               |
+| Python      | 3.11+   | Local development & testing          |
+| AWS CLI     | 2.x     | Deploy CloudFormation / S3 access    |
+| API Key     | —       | Free Alpha Vantage key ([get one](https://www.alphavantage.co/support/#api-key)) |
 
 ---
 
@@ -74,7 +74,7 @@ deployed through **CloudFormation**.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/YOUR_USERNAME/Real-Time-Stock-Market-Analysis.git
+git clone https://github.com/Vulasala-Hari-Krishna/Real-Time-Stock-Market-Analysis.git
 cd Real-Time-Stock-Market-Analysis
 
 # 2. One-time setup (checks prerequisites, creates .env, builds images)
@@ -310,9 +310,10 @@ and pull request to `main`:
 | **CFN Lint**         | Validates CloudFormation YAML                        |
 | **Docker Build**     | Builds all Dockerfiles to verify no build errors     |
 
-Additional workflows handle image publishing (`build-images.yaml`),
-infrastructure deployment (`deploy-infra.yaml`), and teardown
-(`teardown-infra.yaml`).
+Additional manual-only workflows (triggered via GitHub Actions UI):
+`build-images.yaml` (Docker image publishing),
+`deploy-infra.yaml` (CloudFormation deployment), and
+`teardown-infra.yaml` (stack teardown).
 
 ---
 
