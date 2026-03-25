@@ -104,13 +104,24 @@ make stop
 | `ALPHA_VANTAGE_API_KEY`   | —                             | Alpha Vantage API key            |
 | `AWS_ACCESS_KEY_ID`       | —                             | AWS IAM access key               |
 | `AWS_SECRET_ACCESS_KEY`   | —                             | AWS IAM secret key               |
-| `AWS_DEFAULT_REGION`      | `us-east-1`                   | AWS region                       |
+| `AWS_DEFAULT_REGION`      | `us-east-1`                   | AWS region (single source — see below) |
 | `S3_BUCKET_NAME`          | `stock-market-datalake-bucket`| S3 data lake bucket              |
 | `KAFKA_BROKER`            | `localhost:9092`              | Kafka bootstrap server           |
 | `RUN_PIPELINE`            | `true`                        | Kill switch for the producer     |
 | `MAX_ITERATIONS`          | `10`                          | Producer auto-stop limit         |
 | `POLL_INTERVAL_SECONDS`   | `60`                          | Seconds between quote polls      |
 | `ENVIRONMENT`             | `dev`                         | Environment name                 |
+
+### Changing the AWS Region
+
+All components read the region from a single source:
+
+- **Local / Docker**: set `AWS_DEFAULT_REGION` in your `.env` file (e.g. `ap-south-1`).
+  This flows to Python code (`settings.py`), shell scripts, and the dashboard automatically.
+- **GitHub Actions**: when triggering the **Deploy** or **Teardown** workflow, enter the
+  desired region in the `aws-region` input field. Alternatively, create a repository
+  variable named `AWS_REGION` (Settings → Variables → Actions) so every run
+  uses it by default.
 
 ---
 

@@ -41,7 +41,7 @@ deploy_stack() {
     aws cloudformation deploy \
         --stack-name "${stack_name}" \
         --template-file "${template_file}" \
-        --parameter-overrides "$(jq -r '.[] | "\(.ParameterKey)=\(.ParameterValue)"' "${PARAMS_FILE}" | tr '\n' ' ')" \
+        --parameter-overrides $(jq -r '.[] | "\(.ParameterKey)=\(.ParameterValue)"' "${PARAMS_FILE}" | tr '\n' ' ') \
         --capabilities CAPABILITY_NAMED_IAM \
         --region "${REGION}" \
         --no-fail-on-empty-changeset
