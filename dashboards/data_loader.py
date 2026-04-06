@@ -1,7 +1,8 @@
 """Data loading utilities for the Streamlit dashboard.
 
 Reads gold-layer Parquet files from S3 via boto3/pandas. Falls back to
-demo data when S3 is unavailable (local development).
+demo data when S3 is unavailable (local development).  Also provides
+a loader for real-time tick data from the silver layer.
 """
 
 import logging
@@ -254,4 +255,102 @@ def load_fundamentals() -> pd.DataFrame:
     df = _try_read_s3("fundamentals")
     if df is None:
         df = _generate_demo_fundamentals()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Live tick data (silver layer — speed layer of Lambda Architecture)
+# ---------------------------------------------------------------------------
+
+
+def _s3_silver_path(table: str) -> str:
+    """Build an S3 URI for a silver-layer table.
+
+    Args:
+        table: Table name (e.g. 'stock_ticks').
+
+    Returns:
+        S3 URI string.
+    """
+    bucket = os.environ.get("S3_BUCKET_NAME", "stock-market-datalake")
+    return f"s3://{bucket}/silver/{table}"
+
+
+def _try_read_silver(table: str) -> Optional[pd.DataFrame]:
+    """Attempt to read a Parquet table from the silver layer.
+
+    Args:
+        table: Silver-layer table name.
+
+    Returns:
+        DataFrame if successful, None otherwise.
+    """
+    try:
+        path = _s3_silver_path(table)
+        df = pd.read_parquet(
+            path,
+            storage_options={
+                "key": os.environ.get("AWS_ACCESS_KEY_ID", ""),
+                "secret": os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+                "client_kwargs": {
+                    "region_name": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+                },
+            },
+        )
+        logger.info("Loaded %d rows from %s", len(df), path)
+        return df
+    except Exception:
+        logger.debug("S3 silver read failed for %s, using demo data", table)
+        return None
+
+
+def _generate_demo_live_ticks() -> pd.DataFrame:
+    """Generate deterministic demo live tick data.
+
+    Simulates real-time ticks from the last few hours for all symbols.
+
+    Returns:
+        DataFrame mimicking silver/stock_ticks Parquet data.
+    """
+    rng = np.random.default_rng(99)
+    now = datetime.utcnow()
+    rows = []
+
+    base_prices = {
+        "AAPL": 195.0, "MSFT": 425.0, "GOOGL": 160.0, "AMZN": 190.0,
+        "TSLA": 245.0, "META": 510.0, "NVDA": 900.0, "JPM": 200.0,
+        "V": 285.0, "JNJ": 158.0,
+    }
+
+    for symbol in SYMBOLS:
+        price = base_prices[symbol]
+        # Simulate ~30 ticks per symbol over the last 60 minutes
+        for i in range(30):
+            minutes_ago = 60 - (i * 2)
+            ts = now - timedelta(minutes=minutes_ago)
+            ret = rng.normal(0, 0.002)
+            price *= 1 + ret
+            vol = int(rng.integers(10_000, 200_000))
+            rows.append({
+                "symbol": symbol,
+                "price": round(price, 2),
+                "volume": vol,
+                "timestamp": ts,
+                "source": "alpha_vantage",
+            })
+
+    return pd.DataFrame(rows)
+
+
+def load_live_ticks() -> pd.DataFrame:
+    """Load real-time tick data (S3 silver first, demo fallback).
+
+    Returns:
+        Tick-level DataFrame with symbol, price, volume, timestamp.
+    """
+    df = _try_read_silver("stock_ticks")
+    if df is None:
+        df = _generate_demo_live_ticks()
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df

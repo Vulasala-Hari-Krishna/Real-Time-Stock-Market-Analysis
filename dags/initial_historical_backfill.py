@@ -1,10 +1,14 @@
-"""Daily historical backfill DAG.
+"""One-time historical backfill DAG (manual trigger only).
 
-Fetches 5-year OHLCV history for every watchlist symbol via yfinance,
-writes bronze JSON and silver Parquet to S3.  Validates that all
-symbols were backfilled successfully.
+Downloads 5 years of daily OHLCV data for every watchlist symbol via
+yfinance, writes bronze JSON and silver Parquet to S3.  Validates that
+all symbols were backfilled successfully.
 
-Schedule: daily at 06:00 UTC.
+This DAG has **no schedule** — it is meant to run once when the
+pipeline is first deployed (or when a full data refresh is needed).
+Trigger it manually from the Airflow UI.
+
+Schedule: None (manual trigger via Airflow UI).
 """
 
 from __future__ import annotations
@@ -24,21 +28,21 @@ default_args = {
 
 
 @dag(
-    dag_id="daily_historical_backfill",
-    description="Backfill historical OHLCV data from yfinance to bronze/silver S3 layers",
-    schedule="0 6 * * *",
+    dag_id="initial_historical_backfill",
+    description="One-time 5-year OHLCV backfill from yfinance to bronze/silver S3 layers",
+    schedule=None,
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["batch", "backfill"],
+    tags=["batch", "backfill", "one-time"],
 )
-def daily_historical_backfill() -> None:
-    """Orchestrate historical data backfill and validation."""
+def initial_historical_backfill() -> None:
+    """Orchestrate full historical data backfill and validation."""
 
     @task()
     def fetch_historical_data() -> dict[str, bool]:
-        """Download OHLCV history and write to bronze/silver layers.
+        """Download 5-year OHLCV history and write to bronze/silver layers.
 
         Returns:
             Dict mapping each symbol to its success status.
@@ -48,7 +52,7 @@ def daily_historical_backfill() -> None:
         results = run_backfill()
         succeeded = sum(1 for v in results.values() if v)
         logger.info(
-            "Backfill complete: %d/%d succeeded", succeeded, len(results)
+            "Full backfill complete: %d/%d succeeded", succeeded, len(results)
         )
         return results
 
@@ -75,4 +79,4 @@ def daily_historical_backfill() -> None:
     validate_data(backfill_results)
 
 
-daily_historical_backfill()
+initial_historical_backfill()
