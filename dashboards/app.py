@@ -19,14 +19,18 @@ st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
     "Navigate",
-    ["Market Overview", "Stock Detail", "Sector Analysis"],
+    ["Live Data", "Market Overview", "Stock Detail", "Sector Analysis"],
     index=0,
 )
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Data refreshes from the S3 gold layer.")
+st.sidebar.caption("Live Data reads from the S3 silver layer (speed layer).")
+st.sidebar.caption("Other pages read from the S3 gold layer (batch layer).")
 
-if page == "Market Overview":
+if page == "Live Data":
+    from dashboards.pages.live_data import render
+    render()
+elif page == "Market Overview":
     from dashboards.pages.overview import render
     render()
 elif page == "Stock Detail":

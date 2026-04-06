@@ -4,39 +4,43 @@
 ![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An end-to-end, real-time stock market analytics platform that ingests live
-quotes from Alpha Vantage, streams them through Kafka and Spark Structured
-Streaming, stores data in a **medallion architecture** (bronze → silver → gold)
-on **AWS S3**, orchestrates batch enrichment with **Airflow**, and surfaces
-interactive dashboards via **Streamlit** — all containerised with Docker and
-deployed through **CloudFormation**.
+An end-to-end **Lambda Architecture** stock market analytics platform that
+ingests live quotes from Alpha Vantage, streams them through Kafka and Spark
+Structured Streaming, stores data in a **medallion architecture** (bronze →
+silver → gold) on **AWS S3**, orchestrates batch enrichment with **Airflow**,
+and surfaces interactive dashboards — **live** and **historical** — via
+**Streamlit**.  All containerised with Docker and deployed through
+**CloudFormation**.
 
 ---
 
-## Architecture
+## Architecture (Lambda Architecture)
 
 ```
-┌────────────────┐     ┌───────────┐     ┌─────────────────────────┐
-│  Alpha Vantage │────▶│   Kafka   │────▶│  Spark Structured       │
-│  (quotes API)  │     │  Broker   │     │  Streaming              │
-└────────────────┘     └───────────┘     └──────────┬──────────────┘
-                                                    │
-                         ┌──────────────────────────┘
-                         ▼
-              ┌─────────────────────────────────────────────┐
-              │              AWS S3  Data Lake               │
-              │  ┌─────────┐  ┌──────────┐  ┌────────────┐  │
-              │  │ Bronze  │  │  Silver  │  │   Gold     │  │
-              │  │ (JSON)  │──▶│(Parquet) │──▶│ (Parquet)  │  │
-              │  └─────────┘  └──────────┘  └────────────┘  │
-              └──────────────────┬──────────────────────────┘
-                                 │
-              ┌──────────────────┼──────────────────┐
-              ▼                  ▼                   ▼
-     ┌────────────┐    ┌──────────────┐    ┌──────────────┐
-     │  Airflow   │    │  Streamlit   │    │  Databricks  │
-     │  (DAGs)    │    │  Dashboard   │    │  Notebooks   │
-     └────────────┘    └──────────────┘    └──────────────┘
+                           SPEED LAYER (real-time)
+┌────────────────┐   ┌───────────┐   ┌──────────────────┐   ┌────────────────────┐
+│  Alpha Vantage │──▶│   Kafka   │──▶│  Spark Structured │──▶│ S3 silver/          │
+│  (quotes API)  │   │  Broker   │   │  Streaming        │   │ stock_ticks         │
+└───────┬────────┘   └───────────┘   └──────────────────┘   │ (cleaned Parquet)   │
+        │                                                    └────────┬───────────┘
+        │  raw backup                                                 │
+        └──────────▶ S3 bronze/                      ┌────────────────┤
+                                                     │ Dashboard      │
+                           BATCH LAYER               │ Live Data tab  │
+┌──────────────────────────────────────────┐         └────────────────┘
+│  Airflow DAGs (daily)                    │
+│                                          │
+│  ┌─────────────────┐  ┌───────────────┐  │
+│  │ Tick Rollup     │  │ Daily         │  │   ┌────────────────────┐
+│  │ ticks → daily   │─▶│ Aggregation   │──│──▶│ S3 gold/           │
+│  │ OHLCV bars      │  │ + Enrichment  │  │   │ (indicators,       │
+│  └─────────────────┘  └───────────────┘  │   │  signals, sector)  │
+│                                          │   └────────┬───────────┘
+└──────────────────────────────────────────┘            │
+                                              ┌────────┴───────────┐
+   One-time seed:                             │ Dashboard          │
+   yfinance 5-year ──▶ S3 silver/historical   │ Historical tabs    │
+                                              └────────────────────┘
 ```
 
 ---
@@ -135,8 +139,9 @@ make demo
 bash scripts/run-demo.sh
 ```
 
-The demo runs the producer for 5 iterations, triggers a historical backfill,
-and opens the Streamlit dashboard so you can explore interactive charts.
+The demo runs the producer for 5 iterations, seeds historical data via
+the initial backfill, and opens the Streamlit dashboard where you can
+explore both live tick data and historical analytics.
 
 ---
 
@@ -174,14 +179,16 @@ Real-Time-Stock-Market-Analysis/
 │   ├── teardown-all.sh
 │   └── parameters/            # dev.json, prod.json
 ├── dags/                      # Airflow DAG definitions
-│   ├── daily_batch_aggregation.py
-│   ├── daily_historical_backfill.py
-│   ├── data_quality_checks.py
-│   └── fundamental_data_refresh.py
+│   ├── daily_tick_rollup.py       # Roll up real-time ticks → daily OHLCV bars
+│   ├── daily_batch_aggregation.py # Indicators, signals, enrichment → gold
+│   ├── data_quality_checks.py     # Freshness, completeness, null, schema
+│   ├── fundamental_data_refresh.py# Weekly fundamentals refresh
+│   └── initial_historical_backfill.py  # One-time 5-year seed (manual)
 ├── dashboards/                # Streamlit analytics dashboard
 │   ├── app.py                 # Main app entry point
 │   ├── data_loader.py         # S3 data reader + demo fallback
 │   └── pages/
+│       ├── live_data.py       # Real-time price board & intraday charts
 │       ├── overview.py        # Market overview & signals
 │       ├── stock_detail.py    # Individual stock deep-dive
 │       └── sector_analysis.py # Sector heatmaps & correlations
@@ -202,9 +209,10 @@ Real-Time-Stock-Market-Analysis/
 │   └── setup-local.sh
 ├── src/                       # Application source code
 │   ├── batch/                 # PySpark batch jobs
-│   │   ├── daily_aggregation.py
-│   │   ├── fundamental_enrichment.py
-│   │   └── historical_backfill.py
+│   │   ├── tick_rollup.py         # Roll up ticks → daily OHLCV
+│   │   ├── daily_aggregation.py   # Technical indicators & signals
+│   │   ├── fundamental_enrichment.py # P/E, market cap enrichment
+│   │   └── historical_backfill.py # One-time 5-year seed
 │   ├── common/                # Shared utilities
 │   │   ├── indicators.py      # Technical indicator functions
 │   │   ├── s3_utils.py        # S3 read/write helpers
@@ -234,30 +242,57 @@ Real-Time-Stock-Market-Analysis/
 
 ## Data Flow
 
+### Speed Layer (real-time)
+
 1. **Ingest** — `stock_producer.py` polls Alpha Vantage every 60 s, publishes
    JSON quotes to the `raw_stock_ticks` Kafka topic, and backs up raw data to
    S3 **bronze** layer.
 
-2. **Stream** — `spark_streaming.py` reads from Kafka in micro-batches,
-   validates records via Pydantic schemas, computes windowed aggregations
-   (5-min, 15-min OHLCV rollups), detects volume anomalies, and writes
-   cleaned Parquet to S3 **silver** layer.
+2. **Stream** — `spark_streaming.py` reads from Kafka in micro-batches (every
+   30 s), validates & cleans records, deduplicates, detects volume anomalies,
+   and writes cleaned Parquet to `silver/stock_ticks`.
 
-3. **Batch** — PySpark jobs (triggered daily by Airflow):
-   - `historical_backfill.py` — downloads 5-year OHLCV history via yfinance,
-     writes bronze JSON + silver Parquet.
-   - `daily_aggregation.py` — computes SMA, EMA, RSI, MACD, Bollinger Bands,
-     generates trading signals, builds sector rollups & correlations → **gold**.
-   - `fundamental_enrichment.py` — fetches P/E, market cap, dividend yield
-     etc. from yfinance, joins with silver prices → **gold**.
+3. **Live Dashboard** — The **Live Data** tab reads directly from
+   `silver/stock_ticks` and shows a real-time price board, intraday charts,
+   today's movers, and pipeline health.
 
-4. **Orchestrate** — Four Airflow DAGs schedule and sequence all batch work
-   with built-in data-quality checks.
+### Batch Layer (daily)
 
-5. **Visualise** — Streamlit dashboard reads gold-layer Parquet and presents:
-   - Market overview table with colour-coded signals
-   - Stock deep-dive with candlestick + SMA/RSI/volume charts
-   - Sector heatmaps & correlation matrices
+4. **Tick Rollup** — `tick_rollup.py` (06:00 UTC) reads real-time ticks from
+   `silver/stock_ticks`, aggregates to daily OHLCV bars per symbol, deduplicates
+   against existing data, and appends to `silver/historical`.
+
+5. **Aggregation** — `daily_aggregation.py` (07:00 UTC) reads `silver/historical`,
+   computes SMA, EMA, RSI, MACD, generates trading signals, builds sector
+   rollups & correlations → **gold** layer.
+
+6. **Enrichment** — `fundamental_enrichment.py` joins gold data with P/E,
+   market cap, dividend yield from yfinance.
+
+### One-Time Seed
+
+7. **Historical Backfill** — `historical_backfill.py` downloads 5-year OHLCV
+   history via yfinance, writes bronze JSON + silver Parquet.  Run once at
+   project setup via the `initial_historical_backfill` DAG (manual trigger).
+### Orchestration
+
+8. **Airflow DAGs** — Five DAGs schedule all work:
+
+   | DAG | Schedule | Purpose |
+   |-----|----------|---------|
+   | `initial_historical_backfill` | Manual (one-time) | Seed 5-year OHLCV history |
+   | `daily_tick_rollup` | Daily 06:00 UTC | Ticks → daily OHLCV bars |
+   | `daily_batch_aggregation` | Daily 07:00 UTC | Indicators + enrichment → gold |
+   | `data_quality_checks` | Daily 08:00 UTC | Freshness, completeness, nulls |
+   | `fundamental_data_refresh` | Weekly Sun 06:00 | Refresh company fundamentals |
+
+### Serving Layer
+
+9. **Dashboard** — Streamlit reads from both the speed and batch layers:
+   - **Live Data** — real-time price board, intraday charts, volume monitor
+   - **Market Overview** — watchlist table with colour-coded signals
+   - **Stock Detail** — candlestick + SMA/RSI/volume charts
+   - **Sector Analysis** — heatmaps & correlation matrices
 
 ---
 
@@ -265,12 +300,14 @@ Real-Time-Stock-Market-Analysis/
 
 | Insight                   | Description                                               |
 |---------------------------|-----------------------------------------------------------|
+| Real-Time Price Feed      | Live prices, intraday charts, today's movers via speed layer |
+| Volume Anomalies          | Spikes > 2\u00d7 the 20-day average (both real-time and batch)  |
 | Technical Signals         | SMA crossovers (golden/death cross), RSI overbought/oversold |
-| Volume Anomalies          | Spikes > 2× the 20-day average                           |
 | MACD Momentum             | MACD line vs signal line divergence                       |
 | Sector Performance        | Daily average returns per sector                          |
 | Pairwise Correlations     | 30-day rolling correlation between all stock pairs        |
 | Fundamental Screening     | Undervalued stocks (forward P/E below market average)     |
+| Pipeline Health           | Live data freshness indicator on the dashboard            |
 
 ---
 
@@ -280,6 +317,7 @@ Real-Time-Stock-Market-Analysis/
 
 | View                | Description                          |
 |---------------------|--------------------------------------|
+| Live Data           | ![live](docs/screenshots/live_data.png) |
 | Market Overview     | ![overview](docs/screenshots/overview.png) |
 | Stock Detail        | ![detail](docs/screenshots/stock_detail.png) |
 | Sector Analysis     | ![sector](docs/screenshots/sector_analysis.png) |
@@ -299,13 +337,13 @@ pytest tests/unit -v --cov=src --cov-report=term-missing --cov-fail-under=80
 pytest tests/integration -v
 ```
 
-The test suite covers 8 modules (220+ tests):
+The test suite covers 9 modules (260+ tests):
 - Technical indicator calculations
 - Pydantic schema validation
 - S3 utility functions
 - Kafka producer logic
 - Spark streaming consumer
-- PySpark batch jobs (backfill, aggregation, enrichment)
+- PySpark batch jobs (backfill, aggregation, enrichment, tick rollup)
 
 ---
 
