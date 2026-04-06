@@ -61,12 +61,8 @@ def create_spark_session(app_name: str = "DailyTickRollup") -> SparkSession:
 
     if settings.aws_access_key_id:
         builder = (
-            builder.config(
-                "spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id
-            )
-            .config(
-                "spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key
-            )
+            builder.config("spark.hadoop.fs.s3a.access.key", settings.aws_access_key_id)
+            .config("spark.hadoop.fs.s3a.secret.key", settings.aws_secret_access_key)
             .config(
                 "spark.hadoop.fs.s3a.endpoint",
                 f"s3.{settings.aws_default_region}.amazonaws.com",
@@ -93,7 +89,9 @@ def read_tick_data(spark: SparkSession, ticks_path: str) -> DataFrame:
     """
     try:
         df = spark.read.parquet(ticks_path)
-        logger.info("Read %d tick partitions from %s", df.rdd.getNumPartitions(), ticks_path)
+        logger.info(
+            "Read %d tick partitions from %s", df.rdd.getNumPartitions(), ticks_path
+        )
         return df
     except Exception:
         logger.warning(
@@ -172,8 +170,7 @@ def deduplicate_against_existing(
         return new_with_flag
     except Exception:
         logger.info(
-            "No existing historical data at %s (first run). "
-            "All %d bars are new.",
+            "No existing historical data at %s (first run). " "All %d bars are new.",
             existing_path,
             new_df.count(),
         )
@@ -194,9 +191,8 @@ def write_daily_bars(df: DataFrame, output_path: str) -> int:
         logger.info("No new bars to write.")
         return 0
 
-    partitioned = (
-        df.withColumn("year", F.year(F.col("date")))
-        .withColumn("month", F.date_format(F.col("date"), "MM"))
+    partitioned = df.withColumn("year", F.year(F.col("date"))).withColumn(
+        "month", F.date_format(F.col("date"), "MM")
     )
 
     (
