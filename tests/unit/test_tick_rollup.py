@@ -81,7 +81,14 @@ class TestDailyOHLCVSchema:
         """Schema contains expected field names."""
         names = {f.name for f in DAILY_OHLCV_SCHEMA.fields}
         expected = {
-            "symbol", "date", "open", "high", "low", "close", "volume", "source",
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "source",
         }
         assert names == expected
 
