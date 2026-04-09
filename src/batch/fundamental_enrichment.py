@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
+import requests
 import yfinance as yf
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.types import (
@@ -98,8 +99,74 @@ def create_spark_session(
 # ------------------------------------------------------------------
 
 
+def _fetch_via_api(symbol: str) -> dict[str, Any]:
+    """Fetch fundamental data directly from Yahoo Finance API.
+
+    Uses the quoteSummary endpoint with crumb authentication as a
+    fallback when yfinance is broken.
+
+    Args:
+        symbol: Ticker symbol.
+
+    Returns:
+        Dict mapping our field names to values. Missing fields are None.
+    """
+    session = requests.Session()
+    session.headers["User-Agent"] = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    )
+    # Get consent cookie
+    session.get("https://fc.yahoo.com/", timeout=15)
+    # Get crumb
+    crumb = session.get(
+        "https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=15
+    ).text
+
+    url = (
+        f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+        f"?modules=defaultKeyStatistics,summaryDetail,assetProfile"
+        f"&crumb={crumb}"
+    )
+    resp = session.get(url, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+
+    result_data = data.get("quoteSummary", {}).get("result")
+    if not result_data:
+        logger.warning("No quoteSummary result for %s", symbol)
+        return {}
+
+    modules = result_data[0]
+    stats = modules.get("defaultKeyStatistics", {})
+    detail = modules.get("summaryDetail", {})
+    profile = modules.get("assetProfile", {})
+
+    def _raw(d: dict, key: str) -> Any:
+        """Extract raw value from Yahoo Finance API nested dict."""
+        v = d.get(key, {})
+        if isinstance(v, dict):
+            return v.get("raw")
+        return v
+
+    return {
+        "market_cap": _raw(detail, "marketCap"),
+        "pe_ratio": _raw(detail, "trailingPE"),
+        "forward_pe": _raw(stats, "forwardPE"),
+        "dividend_yield": _raw(detail, "dividendYield"),
+        "eps": _raw(stats, "trailingEps") or _raw(detail, "trailingEps"),
+        "beta": _raw(stats, "beta"),
+        "fifty_two_week_high": _raw(detail, "fiftyTwoWeekHigh"),
+        "fifty_two_week_low": _raw(detail, "fiftyTwoWeekLow"),
+        "yf_sector": profile.get("sector"),
+        "industry": profile.get("industry"),
+    }
+
+
 def fetch_fundamentals(symbol: str) -> dict[str, Any]:
-    """Fetch fundamental data for a single symbol from yfinance.
+    """Fetch fundamental data for a single symbol.
+
+    Tries yfinance first. If all fields are empty, falls back to
+    the Yahoo Finance quoteSummary API directly.
 
     Args:
         symbol: Ticker symbol (e.g. "AAPL").
@@ -109,18 +176,36 @@ def fetch_fundamentals(symbol: str) -> dict[str, Any]:
         are set to None.
     """
     logger.info("Fetching fundamentals for %s", symbol)
-    ticker = yf.Ticker(symbol)
-    info = ticker.info or {}
-
     result: dict[str, Any] = {"symbol": symbol.upper()}
-    for yf_key, our_key in FUNDAMENTAL_FIELDS.items():
-        result[our_key] = info.get(yf_key)
+
+    # Try yfinance first
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        for yf_key, our_key in FUNDAMENTAL_FIELDS.items():
+            result[our_key] = info.get(yf_key)
+    except Exception:
+        logger.warning("yfinance raised an error for %s", symbol, exc_info=True)
+
+    # Check if yfinance returned anything useful
+    value_keys = [k for k in result if k not in ("symbol", "retrieved_at")]
+    has_data = any(result.get(k) is not None for k in value_keys)
+
+    if not has_data:
+        logger.warning("yfinance returned empty info for %s, trying direct API", symbol)
+        try:
+            api_data = _fetch_via_api(symbol)
+            for k, v in api_data.items():
+                result[k] = v
+        except Exception:
+            logger.exception("Direct API fallback also failed for %s", symbol)
 
     result["retrieved_at"] = datetime.now(timezone.utc).isoformat()
+    populated = sum(1 for k in value_keys if result.get(k) is not None)
     logger.info(
         "Fetched fundamentals for %s: %d fields populated",
         symbol,
-        sum(1 for v in result.values() if v is not None) - 2,
+        populated,
     )
     return result
 
@@ -172,10 +257,13 @@ def fundamentals_to_spark(
             pdf[field.name] = None
     pdf = pdf[[f.name for f in FUNDAMENTALS_SCHEMA.fields]]
 
-    # Cast numeric columns to float (yfinance may return ints)
+    # Cast numeric columns to float64 (yfinance/API may return ints
+    # which PySpark's DoubleType rejects)
     for field in FUNDAMENTALS_SCHEMA.fields:
         if isinstance(field.dataType, DoubleType):
-            pdf[field.name] = pd.to_numeric(pdf[field.name], errors="coerce")
+            pdf[field.name] = pd.to_numeric(
+                pdf[field.name], errors="coerce"
+            ).astype("float64")
 
     return spark.createDataFrame(pdf, schema=FUNDAMENTALS_SCHEMA)
 
@@ -192,7 +280,7 @@ def enrich_with_fundamentals(
 
     Uses a left join so every price row is preserved. Columns that
     overlap between price and fundamentals (except ``symbol``) are
-    dropped from the fundamentals side before joini.
+    dropped from the fundamentals side before joining.
 
     Args:
         price_df: Silver-layer OHLCV Spark DataFrame.

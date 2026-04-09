@@ -484,6 +484,9 @@ def compute_correlation_matrix(
     pairs = list(itertools.combinations(symbols, 2))
     for idx in range(window - 1, len(date_col)):
         date_val = date_col.iloc[idx]
+        # Convert pandas Timestamp to Python datetime for PySpark compatibility
+        if hasattr(date_val, "to_pydatetime"):
+            date_val = date_val.to_pydatetime()
         try:
             corr_block = rolling_corr.iloc[
                 idx * len(symbols) : (idx + 1) * len(symbols)

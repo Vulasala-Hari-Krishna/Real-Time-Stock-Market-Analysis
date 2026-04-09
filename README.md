@@ -51,8 +51,8 @@ and surfaces interactive dashboards — **live** and **historical** — via
 |-------------------|------------------------------------|
 | Ingestion         | Alpha Vantage API, Kafka 7.5       |
 | Stream Processing | Spark Structured Streaming 3.5     |
-| Batch Processing  | PySpark 3.5                        |
-| Orchestration     | Apache Airflow 2.8                 |
+| Batch Processing  | PySpark 3.5 (custom Spark cluster) |
+| Orchestration     | Apache Airflow 2.8 (spark-submit)  |
 | Storage           | AWS S3 (medallion architecture)    |
 | Catalog / Query   | AWS Glue, Amazon Athena            |
 | Dashboard         | Streamlit 1.32, Plotly 5.19        |
@@ -60,6 +60,28 @@ and surfaces interactive dashboards — **live** and **historical** — via
 | Infrastructure    | AWS CloudFormation, Docker Compose |
 | CI/CD             | GitHub Actions                     |
 | Language          | Python 3.11                        |
+
+---
+
+## Docker Services
+
+| Service            | Image / Build Context       | Port  | Purpose                                    |
+|--------------------|-----------------------------|-------|--------------------------------------------|
+| `stock-zookeeper`  | `confluentinc/cp-zookeeper` | 2181  | Kafka coordination                         |
+| `stock-kafka`      | `confluentinc/cp-kafka`     | 9092  | Message broker for real-time quotes        |
+| `kafka-init`       | `confluentinc/cp-kafka`     | —     | Creates Kafka topics on startup            |
+| `stock-kafka-producer` | `docker/kafka-producer`  | —     | Polls Alpha Vantage, publishes to Kafka    |
+| `stock-spark-master` | `docker/spark-cluster`    | 8080  | Spark standalone master (Python 3.11 + Spark 3.5.3) |
+| `stock-spark-worker` | `docker/spark-cluster`    | 8081  | Spark standalone worker (4 cores, 4 GB)    |
+| `stock-spark-streaming` | `docker/spark-cluster`  | —     | Spark Structured Streaming consumer        |
+| `stock-airflow-postgres` | `postgres:15`           | 5432  | Airflow metadata database                  |
+| `stock-airflow-webserver` | `docker/airflow`       | 8082  | Airflow UI (admin/admin)                   |
+| `stock-airflow-scheduler` | `docker/airflow`       | —     | DAG scheduling + spark-submit driver       |
+| `stock-streamlit`  | `docker/dashboard`          | 8501  | Analytics dashboard                        |
+
+> The custom Spark cluster image (`docker/spark-cluster/Dockerfile`) is built on
+> `python:3.11-slim` with Spark 3.5.3 binaries and OpenJDK 21, ensuring Python
+> version parity between the Airflow driver and Spark workers.
 
 ---
 
@@ -179,6 +201,7 @@ Real-Time-Stock-Market-Analysis/
 │   ├── teardown-all.sh
 │   └── parameters/            # dev.json, prod.json
 ├── dags/                      # Airflow DAG definitions
+│   ├── spark_submit_config.py     # Shared spark-submit command builder
 │   ├── daily_tick_rollup.py       # Roll up real-time ticks → daily OHLCV bars
 │   ├── daily_batch_aggregation.py # Indicators, signals, enrichment → gold
 │   ├── data_quality_checks.py     # Freshness, completeness, null, schema
@@ -194,9 +217,10 @@ Real-Time-Stock-Market-Analysis/
 │       └── sector_analysis.py # Sector heatmaps & correlations
 ├── docker/                    # Docker build contexts
 │   ├── docker-compose.yaml    # All services orchestration
-│   ├── airflow/               # Airflow image
+│   ├── airflow/               # Airflow image (Python 3.11 + Java 17)
 │   ├── dashboard/             # Streamlit image
 │   ├── kafka-producer/        # Producer image
+│   ├── spark-cluster/         # Custom Spark master/worker image
 │   └── spark-jobs/            # Spark jobs image
 ├── notebooks/                 # Databricks exploration notebooks
 │   ├── 01_explore_bronze.py
@@ -267,16 +291,24 @@ Real-Time-Stock-Market-Analysis/
    rollups & correlations → **gold** layer.
 
 6. **Enrichment** — `fundamental_enrichment.py` joins gold data with P/E,
-   market cap, dividend yield from yfinance.
+   market cap, dividend yield.  Uses yfinance with an automatic fallback to the
+   Yahoo Finance `quoteSummary` API (crumb-authenticated) when the library is
+   unavailable.
 
 ### One-Time Seed
 
 7. **Historical Backfill** — `historical_backfill.py` downloads 5-year OHLCV
-   history via yfinance, writes bronze JSON + silver Parquet.  Run once at
-   project setup via the `initial_historical_backfill` DAG (manual trigger).
+   history via yfinance (with automatic fallback to the Yahoo Finance chart API
+   when the library is broken), writes bronze JSON + silver Parquet in
+   Hive-style partitioning (`symbol=X/year=Y/month=M/`).  Run once at project
+   setup via the `initial_historical_backfill` DAG (manual trigger).
 ### Orchestration
 
-8. **Airflow DAGs** — Five DAGs schedule all work:
+8. **Airflow DAGs** — Five DAGs schedule all work.  All Spark jobs are
+   submitted to the standalone Spark cluster via `spark-submit` (using
+   `BashOperator`), configured through a shared helper
+   (`dags/spark_submit_config.py`).  This ensures the Airflow scheduler
+   stays lightweight while Spark workers handle heavy computation.
 
    | DAG | Schedule | Purpose |
    |-----|----------|---------|
@@ -291,8 +323,30 @@ Real-Time-Stock-Market-Analysis/
 9. **Dashboard** — Streamlit reads from both the speed and batch layers:
    - **Live Data** — real-time price board, intraday charts, volume monitor
    - **Market Overview** — watchlist table with colour-coded signals
-   - **Stock Detail** — candlestick + SMA/RSI/volume charts
+   - **Stock Detail** — candlestick + SMA/RSI/volume charts, fundamental metrics
    - **Sector Analysis** — heatmaps & correlation matrices
+
+### S3 Data Lake Layout (Medallion Architecture)
+
+All layers use **Hive-style partitioning** (`symbol=X/year=Y/month=M/`).
+
+```
+s3://<bucket>/
+├── bronze/
+│   └── historical/         # Raw JSON from Yahoo Finance backfill
+│       └── symbol=AAPL/year=2024/month=6/...
+├── silver/
+│   ├── historical/         # Cleaned daily OHLCV Parquet
+│   │   └── symbol=AAPL/year=2024/month=6/...
+│   └── stock_ticks/        # Real-time tick Parquet from Spark Streaming
+│       └── year=2026/month=4/day=9/...
+└── gold/
+    ├── daily_summaries/    # Technical indicators, signals, sector tags
+    ├── sector_performance/ # Avg return, top/bottom performers per sector
+    ├── correlations/       # 30-day rolling pairwise correlations
+    ├── fundamentals/       # P/E, market cap, EPS, beta per symbol
+    └── enriched_prices/    # Prices joined with fundamental metrics
+```
 
 ---
 
@@ -313,14 +367,17 @@ Real-Time-Stock-Market-Analysis/
 
 ## Screenshots
 
-> *Screenshots will be added after the first live run.*
+| View                | Screenshot                              |
+|---------------------|-----------------------------------------|
+| Live Data           | ![Live Data](docs/screenshots/live_data.png) |
+| Market Overview     | ![Market Overview](docs/screenshots/overview.png) |
+| Stock Detail        | ![Stock Detail](docs/screenshots/stock_detail.png) |
+| Sector Analysis     | ![Sector Analysis](docs/screenshots/sector_analysis.png) |
 
-| View                | Description                          |
-|---------------------|--------------------------------------|
-| Live Data           | ![live](docs/screenshots/live_data.png) |
-| Market Overview     | ![overview](docs/screenshots/overview.png) |
-| Stock Detail        | ![detail](docs/screenshots/stock_detail.png) |
-| Sector Analysis     | ![sector](docs/screenshots/sector_analysis.png) |
+> **To capture screenshots:** Open the dashboard at `http://localhost:8501`,
+> navigate to each page, and save screenshots to `docs/screenshots/`.
+> Name them `live_data.png`, `overview.png`, `stock_detail.png`, and
+> `sector_analysis.png`.
 
 ---
 
@@ -337,7 +394,7 @@ pytest tests/unit -v --cov=src --cov-report=term-missing --cov-fail-under=80
 pytest tests/integration -v
 ```
 
-The test suite covers 9 modules (260+ tests):
+The test suite covers 9 modules (234 tests):
 - Technical indicator calculations
 - Pydantic schema validation
 - S3 utility functions

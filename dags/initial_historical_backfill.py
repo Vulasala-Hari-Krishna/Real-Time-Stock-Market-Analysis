@@ -4,6 +4,9 @@ Downloads 5 years of daily OHLCV data for every watchlist symbol via
 yfinance, writes bronze JSON and silver Parquet to S3.  Validates that
 all symbols were backfilled successfully.
 
+The Spark job is submitted to the standalone Spark cluster via
+``spark-submit`` — Airflow only orchestrates.
+
 This DAG has **no schedule** — it is meant to run once when the
 pipeline is first deployed (or when a full data refresh is needed).
 Trigger it manually from the Airflow UI.
@@ -17,6 +20,9 @@ import logging
 from datetime import datetime, timedelta
 
 from airflow.decorators import dag, task
+from airflow.operators.bash import BashOperator
+
+from spark_submit_config import spark_submit_cmd
 
 logger = logging.getLogger(__name__)
 
@@ -40,43 +46,42 @@ default_args = {
 def initial_historical_backfill() -> None:
     """Orchestrate full historical data backfill and validation."""
 
-    @task()
-    def fetch_historical_data() -> dict[str, bool]:
-        """Download 5-year OHLCV history and write to bronze/silver layers.
-
-        Returns:
-            Dict mapping each symbol to its success status.
-        """
-        from src.batch.historical_backfill import run_backfill
-
-        results = run_backfill()
-        succeeded = sum(1 for v in results.values() if v)
-        logger.info(
-            "Full backfill complete: %d/%d succeeded", succeeded, len(results)
-        )
-        return results
+    run_backfill = BashOperator(
+        task_id="fetch_historical_data",
+        bash_command=spark_submit_cmd("/opt/airflow/src/batch/historical_backfill.py"),
+    )
 
     @task()
-    def validate_data(results: dict[str, bool]) -> None:
-        """Validate that all watchlist symbols were backfilled.
+    def validate_data() -> None:
+        """Validate that all watchlist symbols were backfilled to S3."""
+        import boto3
 
-        Args:
-            results: Symbol → success mapping from the backfill task.
-
-        Raises:
-            ValueError: If any symbol failed to backfill.
-        """
+        from src.config.settings import get_settings
         from src.config.watchlist import SYMBOLS
 
-        failed = [sym for sym in SYMBOLS if not results.get(sym, False)]
-        if failed:
-            raise ValueError(
-                f"Backfill failed for {len(failed)} symbols: {failed}"
-            )
-        logger.info("All %d symbols validated successfully", len(SYMBOLS))
+        settings = get_settings()
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_secret_access_key,
+            region_name=settings.aws_default_region,
+        )
 
-    backfill_results = fetch_historical_data()
-    validate_data(backfill_results)
+        missing = []
+        for symbol in SYMBOLS:
+            response = s3.list_objects_v2(
+                Bucket=settings.s3_bucket_name,
+                Prefix=f"silver/historical/symbol={symbol}/",
+                MaxKeys=1,
+            )
+            if response.get("KeyCount", 0) == 0:
+                missing.append(symbol)
+
+        if missing:
+            raise ValueError(f"Backfill failed for {len(missing)} symbols: {missing}")
+        logger.info("All %d symbols validated in silver layer", len(SYMBOLS))
+
+    run_backfill >> validate_data()
 
 
 initial_historical_backfill()

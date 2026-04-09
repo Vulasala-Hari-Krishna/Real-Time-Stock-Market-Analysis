@@ -9,8 +9,10 @@ Idempotent: safe to re-run — existing partitions are overwritten.
 """
 
 import logging
+import time
 
 import pandas as pd
+import requests as _requests
 import yfinance as yf
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -80,10 +82,10 @@ def create_spark_session(app_name: str = "HistoricalBackfill") -> SparkSession:
 
 
 def download_history(symbol: str, years: int = BACKFILL_YEARS) -> pd.DataFrame:
-    """Download historical OHLCV data from yfinance.
+    """Download historical OHLCV data from Yahoo Finance.
 
-    This is the only pandas boundary — yfinance returns pandas DataFrames.
-    The caller converts the result to a Spark DataFrame immediately.
+    Uses the Yahoo Finance chart API directly as a primary method,
+    falling back to yfinance if the direct call fails.
 
     Args:
         symbol: Ticker symbol (e.g. "AAPL").
@@ -96,7 +98,10 @@ def download_history(symbol: str, years: int = BACKFILL_YEARS) -> pd.DataFrame:
     period = f"{years}y"
     logger.info("Downloading %s history for %s", period, symbol)
 
-    df = yf.download(symbol, period=period, auto_adjust=True, progress=False)
+    df = _download_via_api(symbol, period)
+    if df is None or df.empty:
+        logger.info("Direct API failed for %s, trying yfinance fallback", symbol)
+        df = yf.download(symbol, period=period, auto_adjust=True, progress=False)
 
     if df is None or df.empty:
         logger.warning("No data returned for %s", symbol)
@@ -119,6 +124,41 @@ def download_history(symbol: str, years: int = BACKFILL_YEARS) -> pd.DataFrame:
     df["symbol"] = symbol.upper()
     logger.info("Downloaded %d rows for %s", len(df), symbol)
     return df
+
+
+def _download_via_api(symbol: str, period: str) -> pd.DataFrame:
+    """Download OHLCV data directly from Yahoo Finance chart API.
+
+    Args:
+        symbol: Ticker symbol.
+        period: Period string (e.g. "5y").
+
+    Returns:
+        pandas DataFrame or empty DataFrame on failure.
+    """
+    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {"range": period, "interval": "1d"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = _requests.get(url, params=params, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        quotes = result["indicators"]["quote"][0]
+        return pd.DataFrame(
+            {
+                "date": pd.to_datetime(timestamps, unit="s"),
+                "open": quotes["open"],
+                "high": quotes["high"],
+                "low": quotes["low"],
+                "close": quotes["close"],
+                "volume": quotes["volume"],
+            }
+        )
+    except Exception:
+        logger.warning("Direct Yahoo API call failed for %s", symbol)
+        return pd.DataFrame()
 
 
 def pandas_to_spark(spark: SparkSession, pdf: pd.DataFrame) -> DataFrame:
@@ -215,9 +255,9 @@ def backfill_symbol(
         return False
 
     sdf = pandas_to_spark(spark, pdf)
-    write_bronze(sdf, f"{bronze_path}/{symbol}")
+    write_bronze(sdf, bronze_path)
     silver_df = transform_to_silver(sdf)
-    write_silver(silver_df, f"{silver_path}/{symbol}")
+    write_silver(silver_df, silver_path)
 
     logger.info("Backfill complete for %s", symbol)
     return True
@@ -254,7 +294,9 @@ def run_backfill(
         bucket,
     )
 
-    for symbol in symbols:
+    for i, symbol in enumerate(symbols):
+        if i > 0:
+            time.sleep(2)  # Rate-limit yfinance requests
         try:
             results[symbol] = backfill_symbol(spark, symbol, bronze_path, silver_path)
         except Exception:
@@ -274,13 +316,19 @@ def run_backfill(
 
 def main() -> None:
     """Entry point for the historical backfill job."""
+    import sys
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     spark = create_spark_session()
     try:
-        run_backfill(spark)
+        results = run_backfill(spark)
+        succeeded = sum(1 for v in results.values() if v)
+        if succeeded == 0:
+            logger.error("All symbols failed — exiting with error")
+            sys.exit(1)
     finally:
         spark.stop()
 

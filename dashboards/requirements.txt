@@ -5,3 +5,5 @@ plotly==5.19.0
 pydantic==2.6.4
 pydantic-settings==2.2.1
 pyarrow==15.0.2
+s3fs==2024.2.0
+fsspec==2024.2.0

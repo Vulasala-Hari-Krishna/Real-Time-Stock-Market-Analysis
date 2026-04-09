@@ -149,9 +149,15 @@ class TestOHLCVSchema:
 class TestDownloadHistory:
     """Tests for the yfinance download wrapper."""
 
+    @patch(
+        "src.batch.historical_backfill._download_via_api", return_value=pd.DataFrame()
+    )
     @patch("src.batch.historical_backfill.yf.download")
     def test_successful_download(
-        self, mock_download: MagicMock, sample_yfinance_df: pd.DataFrame
+        self,
+        mock_download: MagicMock,
+        _mock_api: MagicMock,
+        sample_yfinance_df: pd.DataFrame,
     ) -> None:
         """Successful download returns DataFrame with symbol column."""
         mock_download.return_value = sample_yfinance_df
@@ -165,8 +171,13 @@ class TestDownloadHistory:
             "AAPL", period=f"{BACKFILL_YEARS}y", auto_adjust=True, progress=False
         )
 
+    @patch(
+        "src.batch.historical_backfill._download_via_api", return_value=pd.DataFrame()
+    )
     @patch("src.batch.historical_backfill.yf.download")
-    def test_empty_download(self, mock_download: MagicMock) -> None:
+    def test_empty_download(
+        self, mock_download: MagicMock, _mock_api: MagicMock
+    ) -> None:
         """Empty download returns empty DataFrame."""
         mock_download.return_value = pd.DataFrame()
 
@@ -174,8 +185,13 @@ class TestDownloadHistory:
 
         assert result.empty
 
+    @patch(
+        "src.batch.historical_backfill._download_via_api", return_value=pd.DataFrame()
+    )
     @patch("src.batch.historical_backfill.yf.download")
-    def test_none_download(self, mock_download: MagicMock) -> None:
+    def test_none_download(
+        self, mock_download: MagicMock, _mock_api: MagicMock
+    ) -> None:
         """None download returns empty DataFrame."""
         mock_download.return_value = None
 
@@ -183,8 +199,13 @@ class TestDownloadHistory:
 
         assert result.empty
 
+    @patch(
+        "src.batch.historical_backfill._download_via_api", return_value=pd.DataFrame()
+    )
     @patch("src.batch.historical_backfill.yf.download")
-    def test_unexpected_columns(self, mock_download: MagicMock) -> None:
+    def test_unexpected_columns(
+        self, mock_download: MagicMock, _mock_api: MagicMock
+    ) -> None:
         """DataFrame with missing columns returns empty."""
         mock_download.return_value = pd.DataFrame({"Foo": [1, 2], "Bar": [3, 4]})
 
@@ -192,9 +213,15 @@ class TestDownloadHistory:
 
         assert result.empty
 
+    @patch(
+        "src.batch.historical_backfill._download_via_api", return_value=pd.DataFrame()
+    )
     @patch("src.batch.historical_backfill.yf.download")
     def test_custom_years(
-        self, mock_download: MagicMock, sample_yfinance_df: pd.DataFrame
+        self,
+        mock_download: MagicMock,
+        _mock_api: MagicMock,
+        sample_yfinance_df: pd.DataFrame,
     ) -> None:
         """Custom year parameter is passed to yfinance."""
         mock_download.return_value = sample_yfinance_df
@@ -205,9 +232,15 @@ class TestDownloadHistory:
             "AAPL", period="3y", auto_adjust=True, progress=False
         )
 
+    @patch(
+        "src.batch.historical_backfill._download_via_api", return_value=pd.DataFrame()
+    )
     @patch("src.batch.historical_backfill.yf.download")
     def test_column_normalisation(
-        self, mock_download: MagicMock, sample_yfinance_df: pd.DataFrame
+        self,
+        mock_download: MagicMock,
+        _mock_api: MagicMock,
+        sample_yfinance_df: pd.DataFrame,
     ) -> None:
         """Column names are normalised to lowercase."""
         mock_download.return_value = sample_yfinance_df

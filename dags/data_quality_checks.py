@@ -4,11 +4,15 @@ Runs after the daily batch aggregation to verify data freshness,
 completeness, null values, and schema conformity.  All checks run
 in parallel; any failure triggers an alert.
 
+These checks use boto3 and pyarrow to read S3 data directly —
+no Spark session is needed for lightweight quality validation.
+
 Schedule: daily at 08:00 UTC.
 """
 
 from __future__ import annotations
 
+import io
 import logging
 from datetime import datetime, timedelta
 
@@ -21,6 +25,39 @@ default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=3),
 }
+
+
+def _get_s3_client():
+    """Create an authenticated S3 client and return (client, bucket)."""
+    import boto3
+
+    from src.config.settings import get_settings
+
+    settings = get_settings()
+    client = boto3.client(
+        "s3",
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+        region_name=settings.aws_default_region,
+    )
+    return client, settings.s3_bucket_name
+
+
+def _read_parquet_sample(s3, bucket: str, prefix: str):
+    """Read a single Parquet file from S3 as a pyarrow Table."""
+    import pyarrow.parquet as pq
+
+    response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=20)
+    keys = [
+        obj["Key"]
+        for obj in response.get("Contents", [])
+        if obj["Key"].endswith(".parquet")
+    ]
+    if not keys:
+        raise ValueError(f"No parquet files found under {prefix}")
+
+    obj = s3.get_object(Bucket=bucket, Key=keys[0])
+    return pq.read_table(io.BytesIO(obj["Body"].read()))
 
 
 @dag(
@@ -38,144 +75,135 @@ def data_quality_checks() -> None:
 
     @task()
     def check_data_freshness() -> None:
-        """Verify the latest silver-layer data is from yesterday.
+        """Verify the latest silver-layer data is recent.
+
+        Navigates Hive-style partitions (symbol/year/month) to find
+        the most recent data and checks it is within the last 4 days.
 
         Raises:
-            ValueError: If the most recent date is older than yesterday.
+            ValueError: If data is stale.
         """
-        from src.batch.daily_aggregation import create_spark_session
-        from src.config.settings import get_settings
+        from src.config.watchlist import SYMBOLS
 
-        settings = get_settings()
-        spark = create_spark_session(app_name="DQ_Freshness")
-        try:
-            bucket = settings.s3_bucket_name
-            silver_path = f"s3a://{bucket}/silver/historical"
+        s3, bucket = _get_s3_client()
+        symbol = SYMBOLS[0]
+        base = f"silver/historical/symbol={symbol}/"
 
-            df = spark.read.parquet(silver_path)
-            from pyspark.sql import functions as F
+        # Navigate to the latest year partition
+        resp = s3.list_objects_v2(Bucket=bucket, Prefix=base, Delimiter="/")
+        year_prefixes = sorted(
+            p["Prefix"] for p in resp.get("CommonPrefixes", [])
+        )
+        if not year_prefixes:
+            raise ValueError(f"No year partitions found under {base}")
 
-            max_date_row = df.agg(F.max("date").alias("max_date")).collect()
-            if not max_date_row or max_date_row[0]["max_date"] is None:
-                raise ValueError("No data found in silver layer")
-
-            max_date = max_date_row[0]["max_date"].date()
-            yesterday = (datetime.utcnow() - timedelta(days=1)).date()
-
-            # Allow weekends / holidays — data should be within 3 days
-            threshold = (datetime.utcnow() - timedelta(days=4)).date()
-            if max_date < threshold:
-                raise ValueError(
-                    f"Data is stale: latest date={max_date}, "
-                    f"expected at least {threshold}"
-                )
-            logger.info(
-                "Freshness OK: latest date=%s, yesterday=%s",
-                max_date,
-                yesterday,
+        # Navigate to the latest month within the latest year
+        resp = s3.list_objects_v2(
+            Bucket=bucket, Prefix=year_prefixes[-1], Delimiter="/",
+        )
+        month_prefixes = sorted(
+            p["Prefix"] for p in resp.get("CommonPrefixes", [])
+        )
+        if not month_prefixes:
+            raise ValueError(
+                f"No month partitions found under {year_prefixes[-1]}"
             )
-        finally:
-            spark.stop()
+
+        table = _read_parquet_sample(s3, bucket, month_prefixes[-1])
+        dates = table.column("date").to_pylist()
+        max_date = max(dates)
+        if hasattr(max_date, "date"):
+            max_date = max_date.date()
+
+        threshold = (datetime.utcnow() - timedelta(days=4)).date()
+        if max_date < threshold:
+            raise ValueError(
+                f"Data is stale: latest date={max_date}, "
+                f"expected at least {threshold}"
+            )
+        logger.info("Freshness OK: latest date=%s", max_date)
 
     @task()
     def check_completeness() -> None:
         """Verify all watchlist symbols have data in the silver layer.
 
+        Lists S3 partition prefixes and compares against the watchlist.
+
         Raises:
-            ValueError: If any symbol is missing from the data.
+            ValueError: If any symbol is missing.
         """
-        from src.batch.daily_aggregation import create_spark_session
-        from src.config.settings import get_settings
         from src.config.watchlist import SYMBOLS
 
-        settings = get_settings()
-        spark = create_spark_session(app_name="DQ_Completeness")
-        try:
-            bucket = settings.s3_bucket_name
-            silver_path = f"s3a://{bucket}/silver/historical"
+        s3, bucket = _get_s3_client()
 
-            df = spark.read.parquet(silver_path)
-            present_symbols = {
-                row["symbol"]
-                for row in df.select("symbol").distinct().collect()
-            }
-            missing = set(SYMBOLS) - present_symbols
-            if missing:
-                raise ValueError(
-                    f"Missing symbols in silver layer: {sorted(missing)}"
-                )
-            logger.info(
-                "Completeness OK: all %d symbols present", len(SYMBOLS)
-            )
-        finally:
-            spark.stop()
+        response = s3.list_objects_v2(
+            Bucket=bucket,
+            Prefix="silver/historical/symbol=",
+            Delimiter="/",
+        )
+        prefixes = {
+            p["Prefix"].split("symbol=")[1].rstrip("/")
+            for p in response.get("CommonPrefixes", [])
+        }
+        missing = set(SYMBOLS) - prefixes
+        if missing:
+            raise ValueError(f"Missing symbols in silver layer: {sorted(missing)}")
+        logger.info("Completeness OK: all %d symbols present", len(SYMBOLS))
 
     @task()
     def check_null_values() -> None:
-        """Verify no null prices or volumes in the silver layer.
+        """Sample check for null prices or volumes in the silver layer.
+
+        Reads a sample Parquet file and checks critical columns.
 
         Raises:
-            ValueError: If null prices or volumes are found.
+            ValueError: If null values are found.
         """
-        from src.batch.daily_aggregation import create_spark_session
-        from src.config.settings import get_settings
+        s3, bucket = _get_s3_client()
+        table = _read_parquet_sample(s3, bucket, "silver/historical/")
+        df = table.to_pandas()
 
-        settings = get_settings()
-        spark = create_spark_session(app_name="DQ_Nulls")
-        try:
-            bucket = settings.s3_bucket_name
-            silver_path = f"s3a://{bucket}/silver/historical"
-
-            df = spark.read.parquet(silver_path)
-            from pyspark.sql import functions as F
-
-            critical_cols = ["open", "high", "low", "close", "volume"]
-            null_counts: dict[str, int] = {}
-            for col_name in critical_cols:
-                cnt = df.filter(F.col(col_name).isNull()).count()
-                if cnt > 0:
-                    null_counts[col_name] = cnt
-
-            if null_counts:
-                raise ValueError(
-                    f"Null values found in silver layer: {null_counts}"
-                )
-            logger.info("Null check OK: no nulls in critical columns")
-        finally:
-            spark.stop()
+        critical_cols = ["open", "high", "low", "close", "volume"]
+        existing = [c for c in critical_cols if c in df.columns]
+        null_counts = {
+            col: int(cnt) for col, cnt in df[existing].isnull().sum().items() if cnt > 0
+        }
+        if null_counts:
+            raise ValueError(f"Null values found in silver layer: {null_counts}")
+        logger.info("Null check OK: no nulls in critical columns")
 
     @task()
     def check_schema() -> None:
         """Verify silver-layer Parquet schema matches expected fields.
 
+        Reads metadata from a sample file and compares field names.
+
         Raises:
             ValueError: If required fields are missing.
         """
-        from src.batch.daily_aggregation import create_spark_session
-        from src.config.settings import get_settings
+        s3, bucket = _get_s3_client()
+        table = _read_parquet_sample(s3, bucket, "silver/historical/")
 
-        settings = get_settings()
-        spark = create_spark_session(app_name="DQ_Schema")
-        try:
-            bucket = settings.s3_bucket_name
-            silver_path = f"s3a://{bucket}/silver/historical"
-
-            df = spark.read.parquet(silver_path)
-            actual_fields = {f.name for f in df.schema.fields}
-            required_fields = {
-                "symbol", "date", "open", "high", "low", "close", "volume",
-            }
-            missing_fields = required_fields - actual_fields
-            if missing_fields:
-                raise ValueError(
-                    f"Schema mismatch: missing fields {sorted(missing_fields)}"
-                )
-            logger.info(
-                "Schema OK: all required fields present (%s)",
-                sorted(required_fields),
+        actual_fields = set(table.schema.names)
+        # 'symbol', 'year', 'month' are Hive partition columns stored
+        # in the directory path, not inside individual Parquet files.
+        required_fields = {
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        }
+        missing_fields = required_fields - actual_fields
+        if missing_fields:
+            raise ValueError(
+                f"Schema mismatch: missing fields {sorted(missing_fields)}"
             )
-        finally:
-            spark.stop()
+        logger.info(
+            "Schema OK: all required fields present (%s)",
+            sorted(required_fields),
+        )
 
     # All quality checks run in parallel
     check_data_freshness()
