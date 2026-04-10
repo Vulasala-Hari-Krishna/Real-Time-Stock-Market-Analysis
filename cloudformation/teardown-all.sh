@@ -38,58 +38,47 @@ empty_bucket() {
     # Remove current objects (non-versioned fast path)
     aws s3 rm "s3://${bucket_name}" --recursive --region "${REGION}" || true
 
-    # Paginate through ALL versions and delete in batches of 1000
-    local key_marker="" version_marker="" truncated="true"
-    while [[ "${truncated}" == "true" ]]; do
-        local page_args=(--bucket "${bucket_name}" --output json --max-items 1000)
-        if [[ -n "${key_marker}" ]]; then
-            page_args+=(--key-marker "${key_marker}" --version-id-marker "${version_marker}")
-        fi
-
+    # Delete ALL object versions and delete markers.
+    # Loop: list up to 1000 → delete them → repeat until empty.
+    local batch=0
+    while true; do
         local page
-        page=$(aws s3api list-object-versions "${page_args[@]}" 2>/dev/null) || break
+        page=$(aws s3api list-object-versions \
+            --bucket "${bucket_name}" \
+            --max-keys 1000 \
+            --region "${REGION}" \
+            --output json 2>/dev/null) || break
 
-        # Delete versions in this page
-        local versions
-        versions=$(echo "${page}" | python3 -c "
+        # Build delete payload from versions + delete markers
+        local tmpfile
+        tmpfile=$(mktemp)
+        echo "${page}" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 objs = [{'Key': v['Key'], 'VersionId': v['VersionId']}
-        for v in data.get('Versions', []) or []]
+        for v in data.get('Versions') or []]
 objs += [{'Key': m['Key'], 'VersionId': m['VersionId']}
-         for m in data.get('DeleteMarkers', []) or []]
+         for m in data.get('DeleteMarkers') or []]
 if objs:
     print(json.dumps({'Objects': objs, 'Quiet': True}))
-else:
-    print('')
-")
+" > "${tmpfile}"
 
-        if [[ -n "${versions}" ]]; then
-            aws s3api delete-objects \
-                --bucket "${bucket_name}" \
-                --delete "${versions}" \
-                --region "${REGION}" > /dev/null 2>&1 || true
+        # If nothing to delete, we're done
+        if [[ ! -s "${tmpfile}" ]]; then
+            rm -f "${tmpfile}"
+            break
         fi
 
-        truncated=$(echo "${page}" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-print('true' if data.get('IsTruncated', False) else 'false')
-")
-
-        if [[ "${truncated}" == "true" ]]; then
-            key_marker=$(echo "${page}" | python3 -c "
-import sys, json; data = json.load(sys.stdin)
-print(data.get('NextKeyMarker', ''))
-")
-            version_marker=$(echo "${page}" | python3 -c "
-import sys, json; data = json.load(sys.stdin)
-print(data.get('NextVersionIdMarker', ''))
-")
-        fi
+        batch=$((batch + 1))
+        echo "    Deleting version batch ${batch}..."
+        aws s3api delete-objects \
+            --bucket "${bucket_name}" \
+            --delete "file://${tmpfile}" \
+            --region "${REGION}" > /dev/null 2>&1 || true
+        rm -f "${tmpfile}"
     done
 
-    echo ">>> Bucket ${bucket_name} emptied."
+    echo ">>> Bucket ${bucket_name} emptied (${batch} version batches deleted)."
 }
 
 # Empty S3 buckets before stack deletion
