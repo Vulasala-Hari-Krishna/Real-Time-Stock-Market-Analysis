@@ -15,6 +15,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.types import (
     DoubleType,
     StringType,
@@ -75,6 +76,12 @@ def create_spark_session(
 
     builder = SparkSession.builder.appName(app_name).config(
         "spark.sql.shuffle.partitions", "8"
+    ).config(
+        "spark.sql.extensions",
+        "io.delta.sql.DeltaSparkSessionExtension",
+    ).config(
+        "spark.sql.catalog.spark_catalog",
+        "org.apache.spark.sql.delta.catalog.DeltaCatalog",
     )
 
     if settings.aws_access_key_id:
@@ -306,28 +313,68 @@ def enrich_with_fundamentals(
 # ------------------------------------------------------------------
 
 
-def write_fundamentals_gold(df: DataFrame, gold_path: str) -> None:
-    """Write standalone fundamentals to the gold layer.
+def write_fundamentals_gold(
+    spark: SparkSession, df: DataFrame, gold_path: str
+) -> None:
+    """Write standalone fundamentals to the gold layer as Delta.
+
+    Uses MERGE (upsert by symbol) if the Delta table already exists,
+    otherwise writes a new Delta table.
 
     Args:
+        spark: Active SparkSession.
         df: Spark DataFrame of fundamentals.
         gold_path: S3a base path for gold layer.
     """
+    from delta.tables import DeltaTable
+
     path = f"{gold_path}/fundamentals"
-    df.write.mode("overwrite").option("compression", "snappy").parquet(path)
-    logger.info("Wrote gold/fundamentals to %s", path)
+    try:
+        if DeltaTable.isDeltaTable(spark, path):
+            delta_table = DeltaTable.forPath(spark, path)
+            delta_table.alias("existing").merge(
+                df.alias("new"),
+                "existing.symbol = new.symbol",
+            ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+            logger.info("Merged fundamentals into %s (Delta MERGE)", path)
+            return
+    except Exception:
+        pass
+    df.write.format("delta").mode("overwrite").save(path)
+    logger.info("Wrote gold/fundamentals to %s (Delta overwrite)", path)
 
 
-def write_enriched_gold(df: DataFrame, gold_path: str) -> None:
-    """Write enriched price+fundamentals to the gold layer.
+def write_enriched_gold(
+    spark: SparkSession, df: DataFrame, gold_path: str
+) -> None:
+    """Write enriched price+fundamentals to the gold layer as Delta.
+
+    Uses MERGE (upsert by symbol + date) if the Delta table already
+    exists, otherwise writes a new Delta table.
 
     Args:
+        spark: Active SparkSession.
         df: Enriched Spark DataFrame.
         gold_path: S3a base path for gold layer.
     """
+    from delta.tables import DeltaTable
+
     path = f"{gold_path}/enriched_prices"
-    df.write.mode("overwrite").option("compression", "snappy").parquet(path)
-    logger.info("Wrote gold/enriched_prices to %s", path)
+    try:
+        if DeltaTable.isDeltaTable(spark, path):
+            max_date = df.agg(F.max("date")).collect()[0][0]
+            new_rows = df.filter(F.col("date") == max_date)
+            delta_table = DeltaTable.forPath(spark, path)
+            delta_table.alias("existing").merge(
+                new_rows.alias("new"),
+                "existing.symbol = new.symbol AND existing.date = new.date",
+            ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+            logger.info("Merged enriched_prices into %s (Delta MERGE)", path)
+            return
+    except Exception:
+        pass
+    df.write.format("delta").mode("overwrite").save(path)
+    logger.info("Wrote gold/enriched_prices to %s (Delta overwrite)", path)
 
 
 # ------------------------------------------------------------------
@@ -378,8 +425,8 @@ def main() -> None:
 
         price_df = spark.read.parquet(silver_path)
         outputs = run_fundamental_enrichment(spark, price_df)
-        write_fundamentals_gold(outputs["fundamentals"], gold_path)
-        write_enriched_gold(outputs["enriched"], gold_path)
+        write_fundamentals_gold(spark, outputs["fundamentals"], gold_path)
+        write_enriched_gold(spark, outputs["enriched"], gold_path)
     finally:
         spark.stop()
 

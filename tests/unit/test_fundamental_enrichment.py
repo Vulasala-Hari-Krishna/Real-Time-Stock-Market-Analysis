@@ -109,9 +109,10 @@ class TestFetchFundamentals:
         assert result["pe_ratio"] is None
         assert result["yf_sector"] is None
 
+    @patch("src.batch.fundamental_enrichment._fetch_via_api", return_value={})
     @patch("src.batch.fundamental_enrichment.yf.Ticker")
-    def test_empty_info(self, mock_ticker_cls: MagicMock) -> None:
-        """Empty Ticker.info returns all None values."""
+    def test_empty_info(self, mock_ticker_cls: MagicMock, mock_api: MagicMock) -> None:
+        """Empty Ticker.info falls back to API; both empty returns all None."""
         mock_ticker_cls.return_value.info = {}
 
         result = fetch_fundamentals("AAPL")
@@ -120,9 +121,10 @@ class TestFetchFundamentals:
         for our_key in FUNDAMENTAL_FIELDS.values():
             assert result[our_key] is None
 
+    @patch("src.batch.fundamental_enrichment._fetch_via_api", return_value={})
     @patch("src.batch.fundamental_enrichment.yf.Ticker")
-    def test_none_info(self, mock_ticker_cls: MagicMock) -> None:
-        """None Ticker.info returns all None values."""
+    def test_none_info(self, mock_ticker_cls: MagicMock, mock_api: MagicMock) -> None:
+        """None Ticker.info falls back to API; both empty returns all None."""
         mock_ticker_cls.return_value.info = None
 
         result = fetch_fundamentals("AAPL")
@@ -273,39 +275,47 @@ class TestEnrichWithFundamentals:
 
 
 class TestWriteFundamentalsGold:
-    """Tests for writing fundamentals to gold layer."""
+    """Tests for writing fundamentals to gold layer as Delta."""
 
-    def test_writes_parquet_snappy(self) -> None:
-        """Writes with overwrite + snappy compression."""
-        df = MagicMock()
-        mock_write = MagicMock()
-        df.write = mock_write
-        mock_write.mode.return_value = mock_write
-        mock_write.option.return_value = mock_write
+    def test_writes_delta_overwrite_when_no_table(self) -> None:
+        """When no existing Delta table, writes with overwrite."""
+        mock_delta_tables = MagicMock()
+        mock_delta_tables.DeltaTable.isDeltaTable.return_value = False
+        with patch.dict(
+            "sys.modules",
+            {"delta": MagicMock(), "delta.tables": mock_delta_tables},
+        ):
+            mock_spark = MagicMock()
+            df = MagicMock()
+            mock_writer = MagicMock()
+            df.write.format.return_value = mock_writer
+            mock_writer.mode.return_value = mock_writer
 
-        write_fundamentals_gold(df, "s3a://bucket/gold")
+            write_fundamentals_gold(mock_spark, df, "s3a://bucket/gold")
 
-        mock_write.mode.assert_called_with("overwrite")
-        mock_write.option.assert_called_with("compression", "snappy")
-        mock_write.parquet.assert_called_once_with("s3a://bucket/gold/fundamentals")
+            df.write.format.assert_called_once_with("delta")
 
 
 class TestWriteEnrichedGold:
-    """Tests for writing enriched data to gold layer."""
+    """Tests for writing enriched data to gold layer as Delta."""
 
-    def test_writes_parquet_snappy(self) -> None:
-        """Writes with overwrite + snappy compression."""
-        df = MagicMock()
-        mock_write = MagicMock()
-        df.write = mock_write
-        mock_write.mode.return_value = mock_write
-        mock_write.option.return_value = mock_write
+    def test_writes_delta_overwrite_when_no_table(self) -> None:
+        """When no existing Delta table, writes with overwrite."""
+        mock_delta_tables = MagicMock()
+        mock_delta_tables.DeltaTable.isDeltaTable.return_value = False
+        with patch.dict(
+            "sys.modules",
+            {"delta": MagicMock(), "delta.tables": mock_delta_tables},
+        ):
+            mock_spark = MagicMock()
+            df = MagicMock()
+            mock_writer = MagicMock()
+            df.write.format.return_value = mock_writer
+            mock_writer.mode.return_value = mock_writer
 
-        write_enriched_gold(df, "s3a://bucket/gold")
+            write_enriched_gold(mock_spark, df, "s3a://bucket/gold")
 
-        mock_write.mode.assert_called_with("overwrite")
-        mock_write.option.assert_called_with("compression", "snappy")
-        mock_write.parquet.assert_called_once_with("s3a://bucket/gold/enriched_prices")
+            df.write.format.assert_called_once_with("delta")
 
 
 # ---------------------------------------------------------------------------

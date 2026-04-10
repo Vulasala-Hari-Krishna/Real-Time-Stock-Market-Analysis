@@ -44,11 +44,28 @@ default_args = {
     tags=["batch", "backfill", "one-time"],
 )
 def initial_historical_backfill() -> None:
-    """Orchestrate full historical data backfill and validation."""
+    """Orchestrate full historical data backfill, gold-layer seed, and validation."""
 
     run_backfill = BashOperator(
         task_id="fetch_historical_data",
         bash_command=spark_submit_cmd("/opt/airflow/src/batch/historical_backfill.py"),
+    )
+
+    # After backfill, run aggregation in 'full' mode to seed gold Delta tables
+    # with the complete 5-year indicator history.
+    seed_gold = BashOperator(
+        task_id="seed_gold_layer",
+        bash_command=spark_submit_cmd(
+            "/opt/airflow/src/batch/daily_aggregation.py",
+            extra_args="--mode full",
+        ),
+    )
+
+    seed_fundamentals = BashOperator(
+        task_id="seed_fundamentals",
+        bash_command=spark_submit_cmd(
+            "/opt/airflow/src/batch/fundamental_enrichment.py"
+        ),
     )
 
     @task()
@@ -81,7 +98,7 @@ def initial_historical_backfill() -> None:
             raise ValueError(f"Backfill failed for {len(missing)} symbols: {missing}")
         logger.info("All %d symbols validated in silver layer", len(SYMBOLS))
 
-    run_backfill >> validate_data()
+    run_backfill >> validate_data() >> seed_gold >> seed_fundamentals
 
 
 initial_historical_backfill()

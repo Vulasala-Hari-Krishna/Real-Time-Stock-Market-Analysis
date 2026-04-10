@@ -50,7 +50,19 @@ class _FakeColumn:
     def __and__(self, other: object) -> "_FakeColumn":
         return _FakeColumn()
 
+    def __rand__(self, other: object) -> "_FakeColumn":
+        return _FakeColumn()
+
     def __or__(self, other: object) -> "_FakeColumn":
+        return _FakeColumn()
+
+    def __ror__(self, other: object) -> "_FakeColumn":
+        return _FakeColumn()
+
+    def __eq__(self, other: object) -> "_FakeColumn":  # type: ignore[override]
+        return _FakeColumn()
+
+    def __ne__(self, other: object) -> "_FakeColumn":  # type: ignore[override]
         return _FakeColumn()
 
     def __mul__(self, other: object) -> "_FakeColumn":
@@ -151,18 +163,41 @@ def _make_chainable_df() -> MagicMock:
 class TestReadSilverData:
     """Tests for reading silver-layer data."""
 
-    def test_reads_parquet(self) -> None:
-        """Calls spark.read.parquet with the correct path."""
+    def test_reads_parquet_full_mode(self) -> None:
+        """In full mode, calls spark.read.parquet without filtering."""
         mock_spark = MagicMock()
         mock_df = MagicMock()
         mock_spark.read.parquet.return_value = mock_df
 
-        result = read_silver_data(mock_spark, "s3a://bucket/silver/historical")
+        result = read_silver_data(
+            mock_spark, "s3a://bucket/silver/historical", mode="full"
+        )
 
         mock_spark.read.parquet.assert_called_once_with(
             "s3a://bucket/silver/historical"
         )
         assert result is mock_df
+
+    @patch("src.batch.daily_aggregation.F", new_callable=_make_fake_F)
+    def test_reads_parquet_daily_mode_applies_filter(
+        self, mock_f: MagicMock
+    ) -> None:
+        """In daily mode, applies partition filter after read."""
+        mock_spark = MagicMock()
+        mock_df = MagicMock()
+        mock_filtered = MagicMock()
+        mock_spark.read.parquet.return_value = mock_df
+        mock_df.filter.return_value = mock_filtered
+
+        result = read_silver_data(
+            mock_spark, "s3a://bucket/silver/historical", mode="daily"
+        )
+
+        mock_spark.read.parquet.assert_called_once_with(
+            "s3a://bucket/silver/historical"
+        )
+        mock_df.filter.assert_called_once()
+        assert result is mock_filtered
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +665,9 @@ class TestRunDailyAggregation:
 
         run_daily_aggregation(mock_spark, "s3a://bucket/silver")
 
-        mock_read.assert_called_once_with(mock_spark, "s3a://bucket/silver")
+        mock_read.assert_called_once_with(
+            mock_spark, "s3a://bucket/silver", mode="daily"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -639,38 +676,45 @@ class TestRunDailyAggregation:
 
 
 class TestWriteGoldOutputs:
-    """Tests for gold-layer write."""
+    """Tests for gold-layer Delta write."""
 
-    def test_writes_each_output(self) -> None:
-        """Each output is written as Parquet."""
+    @patch("src.batch.daily_aggregation._is_delta_table", return_value=False)
+    @patch.dict("sys.modules", {"delta": MagicMock(), "delta.tables": MagicMock()})
+    def test_full_mode_writes_delta(self, mock_is_delta: MagicMock) -> None:
+        """In full mode, writes each output as a Delta table."""
+        mock_spark = MagicMock()
         df1 = MagicMock()
         df2 = MagicMock()
-        mock_write1 = MagicMock()
-        mock_write2 = MagicMock()
-        df1.write = mock_write1
-        df2.write = mock_write2
-        mock_write1.mode.return_value = mock_write1
-        mock_write1.option.return_value = mock_write1
-        mock_write2.mode.return_value = mock_write2
-        mock_write2.option.return_value = mock_write2
+        mock_writer1 = MagicMock()
+        mock_writer2 = MagicMock()
+        df1.write.format.return_value = mock_writer1
+        mock_writer1.mode.return_value = mock_writer1
+        mock_writer1.option.return_value = mock_writer1
+        df2.write.format.return_value = mock_writer2
+        mock_writer2.mode.return_value = mock_writer2
+        mock_writer2.option.return_value = mock_writer2
 
         outputs = {"daily_summaries": df1, "sector_performance": df2}
-        write_gold_outputs(outputs, "s3a://bucket/gold")
+        write_gold_outputs(mock_spark, outputs, "s3a://bucket/gold", mode="full")
 
-        mock_write1.parquet.assert_called_once_with("s3a://bucket/gold/daily_summaries")
-        mock_write2.parquet.assert_called_once_with(
-            "s3a://bucket/gold/sector_performance"
+        df1.write.format.assert_called_once_with("delta")
+        df2.write.format.assert_called_once_with("delta")
+
+    @patch("src.batch.daily_aggregation._is_delta_table", return_value=False)
+    @patch.dict("sys.modules", {"delta": MagicMock(), "delta.tables": MagicMock()})
+    def test_daily_mode_falls_back_when_no_delta_table(
+        self, mock_is_delta: MagicMock
+    ) -> None:
+        """When Delta table doesn't exist yet, daily mode does a full write."""
+        mock_spark = MagicMock()
+        df = MagicMock()
+        mock_writer = MagicMock()
+        df.write.format.return_value = mock_writer
+        mock_writer.mode.return_value = mock_writer
+        mock_writer.option.return_value = mock_writer
+
+        write_gold_outputs(
+            mock_spark, {"daily_summaries": df}, "s3a://bucket/gold", mode="daily"
         )
 
-    def test_overwrite_with_snappy(self) -> None:
-        """Outputs use overwrite mode and snappy compression."""
-        df = MagicMock()
-        mock_write = MagicMock()
-        df.write = mock_write
-        mock_write.mode.return_value = mock_write
-        mock_write.option.return_value = mock_write
-
-        write_gold_outputs({"summaries": df}, "s3a://bucket/gold")
-
-        mock_write.mode.assert_called_with("overwrite")
-        mock_write.option.assert_called_with("compression", "snappy")
+        df.write.format.assert_called_once_with("delta")
