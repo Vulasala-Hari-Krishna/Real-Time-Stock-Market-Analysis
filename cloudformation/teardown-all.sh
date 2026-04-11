@@ -30,34 +30,55 @@ STACKS=(
 empty_bucket() {
     local bucket_name="$1"
     echo ">>> Emptying bucket: ${bucket_name}"
-    if aws s3api head-bucket --bucket "${bucket_name}" 2>/dev/null; then
-        aws s3 rm "s3://${bucket_name}" --recursive --region "${REGION}"
-        # Delete versioned objects if versioning is enabled
-        local versions
-        versions=$(aws s3api list-object-versions \
-            --bucket "${bucket_name}" \
-            --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
-            --output json 2>/dev/null)
-        if [[ "${versions}" != "null" && "${versions}" != '{"Objects": null}' ]]; then
-            echo "${versions}" | aws s3api delete-objects \
-                --bucket "${bucket_name}" \
-                --delete "$(echo "${versions}")" 2>/dev/null || true
-        fi
-        # Delete markers
-        local markers
-        markers=$(aws s3api list-object-versions \
-            --bucket "${bucket_name}" \
-            --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
-            --output json 2>/dev/null)
-        if [[ "${markers}" != "null" && "${markers}" != '{"Objects": null}' ]]; then
-            echo "${markers}" | aws s3api delete-objects \
-                --bucket "${bucket_name}" \
-                --delete "$(echo "${markers}")" 2>/dev/null || true
-        fi
-        echo ">>> Bucket ${bucket_name} emptied."
-    else
+    if ! aws s3api head-bucket --bucket "${bucket_name}" 2>/dev/null; then
         echo ">>> Bucket ${bucket_name} does not exist, skipping."
+        return
     fi
+
+    # Remove current objects (non-versioned fast path)
+    aws s3 rm "s3://${bucket_name}" --recursive --region "${REGION}" || true
+
+    # Delete ALL object versions and delete markers.
+    # Loop: list up to 1000 → delete them → repeat until empty.
+    local batch=0
+    while true; do
+        local page
+        page=$(aws s3api list-object-versions \
+            --bucket "${bucket_name}" \
+            --max-keys 1000 \
+            --region "${REGION}" \
+            --output json 2>/dev/null) || break
+
+        # Build delete payload from versions + delete markers
+        local tmpfile
+        tmpfile=$(mktemp)
+        echo "${page}" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+objs = [{'Key': v['Key'], 'VersionId': v['VersionId']}
+        for v in data.get('Versions') or []]
+objs += [{'Key': m['Key'], 'VersionId': m['VersionId']}
+         for m in data.get('DeleteMarkers') or []]
+if objs:
+    print(json.dumps({'Objects': objs, 'Quiet': True}))
+" > "${tmpfile}"
+
+        # If nothing to delete, we're done
+        if [[ ! -s "${tmpfile}" ]]; then
+            rm -f "${tmpfile}"
+            break
+        fi
+
+        batch=$((batch + 1))
+        echo "    Deleting version batch ${batch}..."
+        aws s3api delete-objects \
+            --bucket "${bucket_name}" \
+            --delete "file://${tmpfile}" \
+            --region "${REGION}" > /dev/null 2>&1 || true
+        rm -f "${tmpfile}"
+    done
+
+    echo ">>> Bucket ${bucket_name} emptied (${batch} version batches deleted)."
 }
 
 # Empty S3 buckets before stack deletion
