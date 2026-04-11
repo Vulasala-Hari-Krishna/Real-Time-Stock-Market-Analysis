@@ -14,7 +14,9 @@ RUN pip install --no-cache-dir --root-user-action=ignore \
     requests==2.31.0 \
     pydantic==2.6.4 \
     pydantic-settings==2.2.1 \
-    boto3==1.34.62
+    boto3==1.34.62 \
+    pandas==2.2.1 \
+    pyarrow==15.0.2
 
 COPY src/ src/
 

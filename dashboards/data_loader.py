@@ -1,9 +1,9 @@
 """Data loading utilities for the Streamlit dashboard.
 
-Reads gold-layer Parquet files from S3 via boto3/pandas. Falls back to
-demo data when S3 is unavailable (local development).  Also provides
-a loader for real-time tick data from the silver layer.
-"""
+Reads gold-layer **Delta Lake** tables from S3 via the ``deltalake``
+Python package.  Falls back to plain Parquet, then to demo data when
+S3 is unavailable (local development).  Also provides a loader for
+real-time tick data from the silver layer (plain Parquet)."""
 
 import logging
 import os
@@ -47,8 +47,20 @@ def _s3_path(table: str) -> str:
     return f"s3://{bucket}/gold/{table}"
 
 
+def _s3_storage_options() -> dict:
+    """Build S3 storage options dict for deltalake / pandas."""
+    return {
+        "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID", ""),
+        "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+        "AWS_REGION": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+    }
+
+
 def _try_read_s3(table: str) -> Optional[pd.DataFrame]:
-    """Attempt to read a Parquet table from S3.
+    """Attempt to read a gold-layer table from S3.
+
+    Tries Delta Lake format first (via the ``deltalake`` package),
+    then falls back to plain Parquet via ``pandas``.
 
     Args:
         table: Gold-layer table name.
@@ -56,19 +68,33 @@ def _try_read_s3(table: str) -> Optional[pd.DataFrame]:
     Returns:
         DataFrame if successful, None otherwise.
     """
+    path = _s3_path(table)
+    storage_opts = _s3_storage_options()
+
+    # Try Delta Lake format first
     try:
-        path = _s3_path(table)
+        from deltalake import DeltaTable
+
+        dt = DeltaTable(path, storage_options=storage_opts)
+        df = dt.to_pandas()
+        logger.info("Loaded %d rows from %s (Delta)", len(df), path)
+        return df
+    except Exception:
+        logger.debug("Delta read failed for %s, trying plain Parquet", table)
+
+    # Fallback to plain Parquet (backward compatibility)
+    try:
         df = pd.read_parquet(
             path,
             storage_options={
-                "key": os.environ.get("AWS_ACCESS_KEY_ID", ""),
-                "secret": os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+                "key": storage_opts["AWS_ACCESS_KEY_ID"],
+                "secret": storage_opts["AWS_SECRET_ACCESS_KEY"],
                 "client_kwargs": {
-                    "region_name": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+                    "region_name": storage_opts["AWS_REGION"],
                 },
             },
         )
-        logger.info("Loaded %d rows from %s", len(df), path)
+        logger.info("Loaded %d rows from %s (Parquet)", len(df), path)
         return df
     except Exception:
         logger.debug("S3 read failed for %s, using demo data", table)

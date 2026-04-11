@@ -82,6 +82,19 @@ def _price_chart(df: pd.DataFrame, symbol: str) -> go.Figure:
         xaxis_rangeslider_visible=False,
         showlegend=True,
         legend={"orientation": "h", "y": 1.02, "x": 0.5, "xanchor": "center"},
+        xaxis=dict(
+            rangeselector=dict(
+                buttons=[
+                    dict(count=1, label="1M", step="month", stepmode="backward"),
+                    dict(count=6, label="6M", step="month", stepmode="backward"),
+                    dict(count=1, label="1Y", step="year", stepmode="backward"),
+                    dict(count=2, label="2Y", step="year", stepmode="backward"),
+                    dict(count=5, label="5Y", step="year", stepmode="backward"),
+                    dict(label="All", step="all"),
+                ],
+            ),
+            type="date",
+        ),
     )
     return fig
 
@@ -94,18 +107,40 @@ def _fundamental_card(fund_row: pd.Series) -> None:
     """
     st.subheader("Fundamental Data")
     c1, c2, c3, c4 = st.columns(4)
-    mc = fund_row.get("market_cap", 0)
-    c1.metric("Market Cap", f"${mc / 1e9:.1f}B" if mc else "N/A")
-    c2.metric("P/E Ratio", f"{fund_row.get('pe_ratio', 'N/A'):.1f}")
-    c3.metric("Forward P/E", f"{fund_row.get('forward_pe', 'N/A'):.1f}")
-    div_yield = fund_row.get("dividend_yield", 0) or 0
+
+    def _safe(val, default=None):
+        """Return default if val is None, NaN, or missing."""
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return default
+        return val
+
+    mc = _safe(fund_row.get("market_cap"))
+    if mc is None:
+        mc_str = "N/A"
+    elif mc >= 1e12:
+        mc_str = f"${mc / 1e12:.2f}T"
+    elif mc >= 1e9:
+        mc_str = f"${mc / 1e9:.1f}B"
+    else:
+        mc_str = f"${mc / 1e6:.0f}M"
+    c1.metric("Market Cap", mc_str)
+
+    pe = _safe(fund_row.get("pe_ratio"))
+    c2.metric("P/E Ratio", f"{pe:.1f}" if pe is not None else "N/A")
+    fpe = _safe(fund_row.get("forward_pe"))
+    c3.metric("Forward P/E", f"{fpe:.1f}" if fpe is not None else "N/A")
+    div_yield = _safe(fund_row.get("dividend_yield"), 0)
     c4.metric("Dividend Yield", f"{div_yield * 100:.2f}%")
 
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("EPS", f"${fund_row.get('eps', 'N/A')}")
-    c6.metric("Beta", f"{fund_row.get('beta', 'N/A'):.2f}")
-    c7.metric("52W High", f"${fund_row.get('fifty_two_week_high', 'N/A')}")
-    c8.metric("52W Low", f"${fund_row.get('fifty_two_week_low', 'N/A')}")
+    eps = _safe(fund_row.get("eps"))
+    c5.metric("EPS", f"${eps:.2f}" if eps is not None else "N/A")
+    beta = _safe(fund_row.get("beta"))
+    c6.metric("Beta", f"{beta:.2f}" if beta is not None else "N/A")
+    high52 = _safe(fund_row.get("fifty_two_week_high"))
+    c7.metric("52W High", f"${high52:.2f}" if high52 is not None else "N/A")
+    low52 = _safe(fund_row.get("fifty_two_week_low"))
+    c8.metric("52W Low", f"${low52:.2f}" if low52 is not None else "N/A")
 
 
 def render() -> None:
@@ -134,7 +169,12 @@ def render() -> None:
     m2.metric("Daily Return", f"{latest.get('daily_return_pct', 0):.2f}%")
     m3.metric("RSI (14)", f"{latest.get('rsi_14', 0):.1f}")
     signals = latest.get("signals", "")
-    m4.metric("Signals", signals if signals else "None")
+    if signals:
+        sig_list = [s.strip() for s in signals.split(",") if s.strip()]
+        badges = " ".join(f"``{s}``" for s in sig_list)
+        m4.markdown(f"**Signals**  \n{badges}")
+    else:
+        m4.metric("Signals", "None")
 
     # Charts
     fig = _price_chart(stock_df, symbol)

@@ -4,11 +4,20 @@ Reads cleaned OHLCV data from the S3 silver layer as Spark DataFrames,
 computes technical indicators using Spark Window functions, generates
 trading signals, builds sector performance rollups, and calculates
 pairwise rolling correlations.  All outputs are written to S3 gold
-layer as Parquet with snappy compression.
+layer as **Delta Lake** tables.
+
+Supports two modes:
+- **full**: Reads all silver data, computes everything, writes Delta
+  tables with overwrite.  Used for initial backfill.
+- **daily** (default): Reads only the last 200 trading days from silver
+  (partition pruning), computes indicators, extracts only new rows, and
+  incrementally MERGEs them into the existing gold Delta tables.
 """
 
+import argparse
 import itertools
 import logging
+from datetime import datetime, timedelta, timezone
 
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
@@ -48,8 +57,17 @@ def create_spark_session(app_name: str = "DailyAggregation") -> SparkSession:
     """
     settings = get_settings()
 
-    builder = SparkSession.builder.appName(app_name).config(
-        "spark.sql.shuffle.partitions", "8"
+    builder = (
+        SparkSession.builder.appName(app_name)
+        .config("spark.sql.shuffle.partitions", "8")
+        .config(
+            "spark.sql.extensions",
+            "io.delta.sql.DeltaSparkSessionExtension",
+        )
+        .config(
+            "spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        )
     )
 
     if settings.aws_access_key_id:
@@ -74,18 +92,54 @@ def create_spark_session(app_name: str = "DailyAggregation") -> SparkSession:
 # ------------------------------------------------------------------
 
 
-def read_silver_data(spark: SparkSession, silver_path: str) -> DataFrame:
+# Buffer months beyond the longest indicator window (SMA 200 ≈ 10 months).
+# 12 months gives ~250 trading days which is sufficient.
+PARTITION_PRUNE_MONTHS = 12
+
+
+def read_silver_data(
+    spark: SparkSession, silver_path: str, *, mode: str = "daily"
+) -> DataFrame:
     """Read silver-layer OHLCV Parquet data.
+
+    In ``daily`` mode, applies partition pruning to read only the last
+    12 months of data (~250 trading days), which covers the SMA-200
+    look-back window with a safety buffer.  This avoids scanning years
+    of historical data that cannot affect today's indicators.
+
+    In ``full`` mode, reads everything for the initial backfill.
 
     Args:
         spark: Active SparkSession.
         silver_path: S3a path to the silver Parquet directory.
+        mode: ``"full"`` to read all data or ``"daily"`` (default)
+            to apply partition pruning.
 
     Returns:
         Spark DataFrame with OHLCV columns.
     """
     df = spark.read.parquet(silver_path)
-    logger.info("Read silver data from %s", silver_path)
+
+    if mode == "daily":
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=PARTITION_PRUNE_MONTHS * 31
+        )
+        cutoff_year = cutoff.year
+        cutoff_month = cutoff.month
+        df = df.filter(
+            (F.col("year") > cutoff_year)
+            | ((F.col("year") == cutoff_year) & (F.col("month") >= cutoff_month))
+        )
+        logger.info(
+            "Read silver data from %s with partition pruning "
+            "(year >= %d, month >= %d)",
+            silver_path,
+            cutoff_year,
+            cutoff_month,
+        )
+    else:
+        logger.info("Read ALL silver data from %s (full mode)", silver_path)
+
     return df
 
 
@@ -484,6 +538,9 @@ def compute_correlation_matrix(
     pairs = list(itertools.combinations(symbols, 2))
     for idx in range(window - 1, len(date_col)):
         date_val = date_col.iloc[idx]
+        # Convert pandas Timestamp to Python datetime for PySpark compatibility
+        if hasattr(date_val, "to_pydatetime"):
+            date_val = date_val.to_pydatetime()
         try:
             corr_block = rolling_corr.iloc[
                 idx * len(symbols) : (idx + 1) * len(symbols)
@@ -540,18 +597,22 @@ def compute_daily_summaries(df: DataFrame) -> DataFrame:
 def run_daily_aggregation(
     spark: SparkSession,
     silver_path: str,
+    *,
+    mode: str = "daily",
 ) -> dict[str, DataFrame]:
     """Run the complete daily aggregation pipeline.
 
     Args:
         spark: Active SparkSession.
         silver_path: S3a path to silver-layer Parquet data.
+        mode: ``"full"`` for initial backfill or ``"daily"``
+            for incremental with partition pruning.
 
     Returns:
         Dict with 'daily_summaries', 'sector_performance',
         'correlations' Spark DataFrames.
     """
-    silver_df = read_silver_data(spark, silver_path)
+    silver_df = read_silver_data(spark, silver_path, mode=mode)
     summaries = compute_daily_summaries(silver_df)
     sector_perf = compute_sector_performance(summaries)
     correlations = compute_correlation_matrix(summaries, spark)
@@ -563,17 +624,106 @@ def run_daily_aggregation(
     }
 
 
-def write_gold_outputs(outputs: dict[str, DataFrame], gold_path: str) -> None:
-    """Write all gold-layer outputs to S3 as Parquet.
+def _is_delta_table(spark: SparkSession, path: str) -> bool:
+    """Check whether a Delta table already exists at the given path."""
+    from delta.tables import DeltaTable
+
+    try:
+        return DeltaTable.isDeltaTable(spark, path)
+    except Exception:
+        return False
+
+
+# MERGE key columns for each gold table.
+_MERGE_KEYS: dict[str, str] = {
+    "daily_summaries": "existing.symbol = new.symbol AND existing.date = new.date",
+    "sector_performance": "existing.sector = new.sector AND existing.date = new.date",
+    "correlations": (
+        "existing.symbol_a = new.symbol_a "
+        "AND existing.symbol_b = new.symbol_b "
+        "AND existing.date = new.date"
+    ),
+}
+
+
+def write_gold_outputs(
+    spark: SparkSession,
+    outputs: dict[str, DataFrame],
+    gold_path: str,
+    *,
+    mode: str = "daily",
+) -> None:
+    """Write gold-layer outputs as Delta Lake tables.
+
+    In ``full`` mode, writes (or overwrites) each table as a new Delta
+    table.
+
+    In ``daily`` mode, performs a MERGE (upsert) — inserting new rows
+    and updating existing rows matched by key columns.  If the Delta
+    table does not yet exist, falls back to a full write automatically.
 
     Args:
+        spark: Active SparkSession.
         outputs: Result dict from run_daily_aggregation.
         gold_path: S3a base path for gold layer.
+        mode: ``"full"`` or ``"daily"``.
     """
+    from delta.tables import DeltaTable
+
     for name, df in outputs.items():
         path = f"{gold_path}/{name}"
-        (df.write.mode("overwrite").option("compression", "snappy").parquet(path))
-        logger.info("Wrote gold/%s to %s", name, path)
+
+        if mode == "full" or not _is_delta_table(spark, path):
+            (
+                df.write.format("delta")
+                .mode("overwrite")
+                .option("overwriteSchema", "true")
+                .save(path)
+            )
+            logger.info(
+                "Wrote gold/%s to %s (full overwrite, Delta format)", name, path
+            )
+        else:
+            # Daily incremental MERGE
+            merge_condition = _MERGE_KEYS.get(name)
+            if not merge_condition:
+                logger.warning("No merge keys for %s — falling back to overwrite", name)
+                df.write.format("delta").mode("overwrite").save(path)
+                continue
+
+            # Extract only the latest day's rows to merge
+            max_date = df.agg(F.max("date")).collect()[0][0]
+            new_rows = df.filter(F.col("date") == max_date)
+            row_count = new_rows.count()
+
+            delta_table = DeltaTable.forPath(spark, path)
+            delta_table.alias("existing").merge(
+                new_rows.alias("new"),
+                merge_condition,
+            ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+
+            logger.info(
+                "Merged %d rows into gold/%s at %s (daily incremental)",
+                row_count,
+                name,
+                path,
+            )
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the aggregation job."""
+    parser = argparse.ArgumentParser(description="Daily aggregation batch job")
+    parser.add_argument(
+        "--mode",
+        choices=["full", "daily"],
+        default="daily",
+        help=(
+            "'full' reads all silver data and overwrites gold Delta tables. "
+            "'daily' (default) reads only the last 200 trading days and "
+            "MERGEs new rows into gold."
+        ),
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
@@ -582,6 +732,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    args = _parse_args()
     settings = get_settings()
     spark = create_spark_session()
 
@@ -590,8 +741,9 @@ def main() -> None:
         silver_path = f"s3a://{bucket}/silver/historical"
         gold_path = f"s3a://{bucket}/gold"
 
-        outputs = run_daily_aggregation(spark, silver_path)
-        write_gold_outputs(outputs, gold_path)
+        logger.info("Running daily aggregation in '%s' mode", args.mode)
+        outputs = run_daily_aggregation(spark, silver_path, mode=args.mode)
+        write_gold_outputs(spark, outputs, gold_path, mode=args.mode)
     finally:
         spark.stop()
 
