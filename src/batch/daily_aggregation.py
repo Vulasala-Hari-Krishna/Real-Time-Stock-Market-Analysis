@@ -57,14 +57,17 @@ def create_spark_session(app_name: str = "DailyAggregation") -> SparkSession:
     """
     settings = get_settings()
 
-    builder = SparkSession.builder.appName(app_name).config(
-        "spark.sql.shuffle.partitions", "8"
-    ).config(
-        "spark.sql.extensions",
-        "io.delta.sql.DeltaSparkSessionExtension",
-    ).config(
-        "spark.sql.catalog.spark_catalog",
-        "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+    builder = (
+        SparkSession.builder.appName(app_name)
+        .config("spark.sql.shuffle.partitions", "8")
+        .config(
+            "spark.sql.extensions",
+            "io.delta.sql.DeltaSparkSessionExtension",
+        )
+        .config(
+            "spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        )
     )
 
     if settings.aws_access_key_id:
@@ -118,15 +121,14 @@ def read_silver_data(
     df = spark.read.parquet(silver_path)
 
     if mode == "daily":
-        cutoff = datetime.now(timezone.utc) - timedelta(days=PARTITION_PRUNE_MONTHS * 31)
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=PARTITION_PRUNE_MONTHS * 31
+        )
         cutoff_year = cutoff.year
         cutoff_month = cutoff.month
         df = df.filter(
             (F.col("year") > cutoff_year)
-            | (
-                (F.col("year") == cutoff_year)
-                & (F.col("month") >= cutoff_month)
-            )
+            | ((F.col("year") == cutoff_year) & (F.col("month") >= cutoff_month))
         )
         logger.info(
             "Read silver data from %s with partition pruning "
@@ -685,9 +687,7 @@ def write_gold_outputs(
             # Daily incremental MERGE
             merge_condition = _MERGE_KEYS.get(name)
             if not merge_condition:
-                logger.warning(
-                    "No merge keys for %s — falling back to overwrite", name
-                )
+                logger.warning("No merge keys for %s — falling back to overwrite", name)
                 df.write.format("delta").mode("overwrite").save(path)
                 continue
 

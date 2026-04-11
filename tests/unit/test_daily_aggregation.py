@@ -179,9 +179,7 @@ class TestReadSilverData:
         assert result is mock_df
 
     @patch("src.batch.daily_aggregation.F", new_callable=_make_fake_F)
-    def test_reads_parquet_daily_mode_applies_filter(
-        self, mock_f: MagicMock
-    ) -> None:
+    def test_reads_parquet_daily_mode_applies_filter(self, mock_f: MagicMock) -> None:
         """In daily mode, applies partition filter after read."""
         mock_spark = MagicMock()
         mock_df = MagicMock()

@@ -74,14 +74,17 @@ def create_spark_session(
     """
     settings = get_settings()
 
-    builder = SparkSession.builder.appName(app_name).config(
-        "spark.sql.shuffle.partitions", "8"
-    ).config(
-        "spark.sql.extensions",
-        "io.delta.sql.DeltaSparkSessionExtension",
-    ).config(
-        "spark.sql.catalog.spark_catalog",
-        "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+    builder = (
+        SparkSession.builder.appName(app_name)
+        .config("spark.sql.shuffle.partitions", "8")
+        .config(
+            "spark.sql.extensions",
+            "io.delta.sql.DeltaSparkSessionExtension",
+        )
+        .config(
+            "spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        )
     )
 
     if settings.aws_access_key_id:
@@ -119,9 +122,7 @@ def _fetch_via_api(symbol: str) -> dict[str, Any]:
         Dict mapping our field names to values. Missing fields are None.
     """
     session = requests.Session()
-    session.headers["User-Agent"] = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    )
+    session.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     # Get consent cookie
     session.get("https://fc.yahoo.com/", timeout=15)
     # Get crumb
@@ -268,9 +269,9 @@ def fundamentals_to_spark(
     # which PySpark's DoubleType rejects)
     for field in FUNDAMENTALS_SCHEMA.fields:
         if isinstance(field.dataType, DoubleType):
-            pdf[field.name] = pd.to_numeric(
-                pdf[field.name], errors="coerce"
-            ).astype("float64")
+            pdf[field.name] = pd.to_numeric(pdf[field.name], errors="coerce").astype(
+                "float64"
+            )
 
     return spark.createDataFrame(pdf, schema=FUNDAMENTALS_SCHEMA)
 
@@ -313,9 +314,7 @@ def enrich_with_fundamentals(
 # ------------------------------------------------------------------
 
 
-def write_fundamentals_gold(
-    spark: SparkSession, df: DataFrame, gold_path: str
-) -> None:
+def write_fundamentals_gold(spark: SparkSession, df: DataFrame, gold_path: str) -> None:
     """Write standalone fundamentals to the gold layer as Delta.
 
     Uses MERGE (upsert by symbol) if the Delta table already exists,
@@ -344,9 +343,7 @@ def write_fundamentals_gold(
     logger.info("Wrote gold/fundamentals to %s (Delta overwrite)", path)
 
 
-def write_enriched_gold(
-    spark: SparkSession, df: DataFrame, gold_path: str
-) -> None:
+def write_enriched_gold(spark: SparkSession, df: DataFrame, gold_path: str) -> None:
     """Write enriched price+fundamentals to the gold layer as Delta.
 
     Uses MERGE (upsert by symbol + date) if the Delta table already
