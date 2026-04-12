@@ -16,7 +16,12 @@ and surfaces interactive dashboards — **live** and **historical** — via
 
 ## Architecture (Lambda Architecture)
 
-> **[Interactive diagram →](docs/architecture.drawio)**  *(open in [draw.io](https://app.diagrams.net) — free)*
+![Architecture Diagram](docs/architecture.drawio.svg)
+
+> **[Open in draw.io →](docs/architecture.drawio)** for the editable version.
+
+<details>
+<summary><b>ASCII version</b> (click to expand)</summary>
 
 ```
                               SPEED LAYER (real-time)
@@ -54,6 +59,8 @@ and surfaces interactive dashboards — **live** and **historical** — via
     yfinance 5-year ──▶ S3 bronze/ + silver/historical  │  + Athena (SQL on S3)   │
     then ──▶ gold/ (--mode full) + fundamentals         └─────────────────────────┘
 ```
+
+</details>
 
 <details>
 <summary><b>Visual Architecture Diagram</b> (click to expand)</summary>
@@ -152,8 +159,6 @@ flowchart TB
 ```
 
 </details>
-
-> **[Open in draw.io →](docs/architecture.drawio)** for the editable version with service icons.
 
 ---
 
