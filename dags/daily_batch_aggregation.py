@@ -7,7 +7,7 @@ the gold layer.  Runs after the historical backfill DAG completes.
 Spark jobs are submitted to the standalone Spark cluster via
 ``spark-submit`` — Airflow only orchestrates.
 
-Schedule: daily at 07:00 UTC.
+Schedule: weekdays at 07:00 UTC.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ default_args = {
 @dag(
     dag_id="daily_batch_aggregation",
     description="Compute daily indicators, enrichment, and gold-layer outputs",
-    schedule="0 7 * * *",
+    schedule="0 7 * * 1-5",
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,

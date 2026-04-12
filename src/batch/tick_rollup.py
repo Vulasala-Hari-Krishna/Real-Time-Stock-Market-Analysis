@@ -5,11 +5,19 @@ Reads the real-time tick data written by Spark Streaming to the
 symbol, and appends them to ``silver/historical`` so the downstream
 ``daily_aggregation`` batch job can compute indicators on fresh data.
 
-Idempotent: uses ``dropDuplicates`` on (symbol, date) against the
+Optimised with **partition pruning**: when a ``--date`` argument is
+provided (default: yesterday) the job reads only the single day-level
+partition (``year=YYYY/month=MM/day=DD``) instead of the entire
+stock_ticks dataset.  Use ``--date all`` to fall back to the original
+full-scan behaviour.
+
+Idempotent: uses a ``left_anti`` join on (symbol, date) against the
 existing silver/historical data, so re-runs for the same day are safe.
 """
 
+import argparse
 import logging
+from datetime import date, datetime, timedelta, timezone
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -76,27 +84,53 @@ def create_spark_session(app_name: str = "DailyTickRollup") -> SparkSession:
     return builder.getOrCreate()
 
 
-def read_tick_data(spark: SparkSession, ticks_path: str) -> DataFrame:
+def _partition_path(base_path: str, target_date: date) -> str:
+    """Build the day-level partition path for a given date.
+
+    Args:
+        base_path: S3a base path to silver/stock_ticks.
+        target_date: The calendar date to read.
+
+    Returns:
+        Full path like ``s3a://…/silver/stock_ticks/year=2026/month=04/day=12``.
+    """
+    return (
+        f"{base_path}"
+        f"/year={target_date.year}"
+        f"/month={target_date.month:02d}"
+        f"/day={target_date.day:02d}"
+    )
+
+
+def read_tick_data(
+    spark: SparkSession, ticks_path: str, target_date: date | None = None
+) -> DataFrame:
     """Read real-time tick Parquet data from the silver layer.
+
+    When *target_date* is provided the reader uses partition pruning,
+    reading only ``year=YYYY/month=MM/day=DD`` under *ticks_path*.
+    When ``None`` the full dataset is read (legacy behaviour).
 
     Args:
         spark: Active SparkSession.
         ticks_path: S3a path to silver/stock_ticks.
+        target_date: Optional calendar date for partition pruning.
 
     Returns:
         Spark DataFrame with tick-level data, or empty DataFrame
         if the path does not exist yet (first-run scenario).
     """
+    read_path = _partition_path(ticks_path, target_date) if target_date else ticks_path
     try:
-        df = spark.read.parquet(ticks_path)
+        df = spark.read.parquet(read_path)
         logger.info(
-            "Read %d tick partitions from %s", df.rdd.getNumPartitions(), ticks_path
+            "Read %d tick partitions from %s", df.rdd.getNumPartitions(), read_path
         )
         return df
     except Exception:
         logger.warning(
             "No tick data found at %s (first run?). Returning empty DataFrame.",
-            ticks_path,
+            read_path,
         )
         return spark.createDataFrame([], DAILY_OHLCV_SCHEMA)
 
@@ -138,17 +172,26 @@ def rollup_ticks_to_daily(df: DataFrame) -> DataFrame:
 
 
 def deduplicate_against_existing(
-    new_df: DataFrame, existing_path: str, spark: SparkSession
+    new_df: DataFrame,
+    existing_path: str,
+    spark: SparkSession,
+    target_date: date | None = None,
 ) -> DataFrame:
     """Remove rows from new_df that already exist in the historical data.
 
     This makes the job idempotent — re-running for the same day won't
     create duplicate rows.
 
+    When *target_date* is provided, only the matching ``year``/``month``
+    partitions are read from the historical data (partition pruning).
+    For a 5-year, 10-symbol history this reduces the scan from ~600
+    partitions to ~10 (one per symbol for that month).
+
     Args:
         new_df: Newly rolled-up daily OHLCV bars.
         existing_path: S3a path to silver/historical.
         spark: Active SparkSession.
+        target_date: Optional date used to prune historical partitions.
 
     Returns:
         DataFrame containing only rows not already in the historical data.
@@ -158,6 +201,18 @@ def deduplicate_against_existing(
 
     try:
         existing = spark.read.parquet(existing_path)
+
+        if target_date is not None:
+            existing = existing.filter(
+                (F.col("year") == target_date.year)
+                & (F.col("month") == f"{target_date.month:02d}")
+            )
+            logger.info(
+                "Dedup partition pruning: reading only year=%d/month=%02d",
+                target_date.year,
+                target_date.month,
+            )
+
         existing_keys = existing.select("symbol", "date").distinct()
         new_with_flag = new_df.join(
             existing_keys, on=["symbol", "date"], how="left_anti"
@@ -207,11 +262,31 @@ def write_daily_bars(df: DataFrame, output_path: str) -> int:
     return row_count
 
 
-def run_tick_rollup(spark: SparkSession | None = None) -> int:
+def _parse_target_date(value: str | None) -> date | None:
+    """Convert the CLI *--date* value to a :class:`date` or ``None``.
+
+    * ``None`` / ``"yesterday"`` → yesterday's date (default).
+    * ``"all"`` → ``None`` (full-scan, legacy behaviour).
+    * ``"YYYY-MM-DD"`` → explicit date.
+    """
+    if value is None or value.lower() == "yesterday":
+        return datetime.now(timezone.utc).date() - timedelta(days=1)
+    if value.lower() == "all":
+        return None
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def run_tick_rollup(
+    spark: SparkSession | None = None, target_date_str: str | None = None
+) -> int:
     """Run the full tick-to-OHLCV rollup pipeline.
 
     Args:
         spark: SparkSession. Created if not provided.
+        target_date_str: Date string controlling partition pruning.
+            ``None`` / ``"yesterday"`` → read only yesterday's partition.
+            ``"all"`` → read entire stock_ticks (legacy full-scan).
+            ``"YYYY-MM-DD"`` → read that specific day's partition.
 
     Returns:
         Number of new daily bars written.
@@ -221,15 +296,23 @@ def run_tick_rollup(spark: SparkSession | None = None) -> int:
     if spark is None:
         spark = create_spark_session()
 
+    target_date = _parse_target_date(target_date_str)
+
     bucket = settings.s3_bucket_name
     ticks_path = f"s3a://{bucket}/silver/stock_ticks"
     historical_path = f"s3a://{bucket}/silver/historical"
 
-    logger.info("Starting tick rollup: bucket=%s", bucket)
+    logger.info(
+        "Starting tick rollup: bucket=%s, target_date=%s",
+        bucket,
+        target_date or "ALL",
+    )
 
-    tick_df = read_tick_data(spark, ticks_path)
+    tick_df = read_tick_data(spark, ticks_path, target_date)
     daily_df = rollup_ticks_to_daily(tick_df)
-    deduped_df = deduplicate_against_existing(daily_df, historical_path, spark)
+    deduped_df = deduplicate_against_existing(
+        daily_df, historical_path, spark, target_date
+    )
     rows_written = write_daily_bars(deduped_df, historical_path)
 
     logger.info("Tick rollup complete: %d new bars written", rows_written)
@@ -242,9 +325,23 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    parser = argparse.ArgumentParser(description="Daily tick-to-OHLCV rollup")
+    parser.add_argument(
+        "--date",
+        default=None,
+        help=(
+            "Target date for partition pruning. "
+            "'yesterday' (default) reads only yesterday's ticks. "
+            "'all' reads the entire stock_ticks dataset. "
+            "'YYYY-MM-DD' reads a specific day."
+        ),
+    )
+    args = parser.parse_args()
+
     spark = create_spark_session()
     try:
-        run_tick_rollup(spark)
+        run_tick_rollup(spark, target_date_str=args.date)
     finally:
         spark.stop()
 

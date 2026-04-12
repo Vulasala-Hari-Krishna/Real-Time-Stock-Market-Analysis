@@ -7,7 +7,7 @@ in parallel; any failure triggers an alert.
 These checks use boto3 and pyarrow to read S3 data directly —
 no Spark session is needed for lightweight quality validation.
 
-Schedule: daily at 08:00 UTC.
+Schedule: weekdays at 08:00 UTC.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def _read_parquet_sample(s3, bucket: str, prefix: str):
 @dag(
     dag_id="data_quality_checks",
     description="Validate freshness, completeness, nulls, and schema of pipeline data",
-    schedule="0 8 * * *",
+    schedule="0 8 * * 1-5",
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,
@@ -91,23 +91,19 @@ def data_quality_checks() -> None:
 
         # Navigate to the latest year partition
         resp = s3.list_objects_v2(Bucket=bucket, Prefix=base, Delimiter="/")
-        year_prefixes = sorted(
-            p["Prefix"] for p in resp.get("CommonPrefixes", [])
-        )
+        year_prefixes = sorted(p["Prefix"] for p in resp.get("CommonPrefixes", []))
         if not year_prefixes:
             raise ValueError(f"No year partitions found under {base}")
 
         # Navigate to the latest month within the latest year
         resp = s3.list_objects_v2(
-            Bucket=bucket, Prefix=year_prefixes[-1], Delimiter="/",
+            Bucket=bucket,
+            Prefix=year_prefixes[-1],
+            Delimiter="/",
         )
-        month_prefixes = sorted(
-            p["Prefix"] for p in resp.get("CommonPrefixes", [])
-        )
+        month_prefixes = sorted(p["Prefix"] for p in resp.get("CommonPrefixes", []))
         if not month_prefixes:
-            raise ValueError(
-                f"No month partitions found under {year_prefixes[-1]}"
-            )
+            raise ValueError(f"No month partitions found under {year_prefixes[-1]}")
 
         table = _read_parquet_sample(s3, bucket, month_prefixes[-1])
         dates = table.column("date").to_pylist()
