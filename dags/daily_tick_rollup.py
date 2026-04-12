@@ -9,7 +9,7 @@ aggregation → gold).
 The Spark job is submitted to the standalone Spark cluster via
 ``spark-submit`` — Airflow only orchestrates.
 
-Schedule: daily at 06:00 UTC (runs before daily_batch_aggregation at 07:00).
+Schedule: weekdays at 06:00 UTC (runs before daily_batch_aggregation at 07:00).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ default_args = {
 @dag(
     dag_id="daily_tick_rollup",
     description="Roll up real-time ticks into daily OHLCV bars for the batch layer",
-    schedule="0 6 * * *",
+    schedule="0 6 * * 1-5",
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,
@@ -46,7 +46,10 @@ def daily_tick_rollup() -> None:
 
     rollup = BashOperator(
         task_id="rollup_ticks",
-        bash_command=spark_submit_cmd("/opt/airflow/src/batch/tick_rollup.py"),
+        bash_command=spark_submit_cmd(
+            "/opt/airflow/src/batch/tick_rollup.py",
+            extra_args="--date {{ ds }}",
+        ),
     )
 
     @task()

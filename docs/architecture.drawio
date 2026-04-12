@@ -1,0 +1,277 @@
+<mxfile host="app.diagrams.net" modified="2026-04-12T00:00:00.000Z" agent="GitHub Copilot" version="24.0.0" type="device">
+  <diagram id="arch-lambda" name="Lambda Architecture">
+    <mxGraphModel dx="1800" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- BACKGROUND SWIM LANES                                  -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <!-- Docker Environment background -->
+        <mxCell id="docker-env" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;strokeWidth=2;dashed=1;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="20" y="20" width="1560" height="960" as="geometry"/>
+        </mxCell>
+        <mxCell id="docker-label" value="&lt;b&gt;Docker Compose Environment&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="35" y="28" width="250" height="26" as="geometry"/>
+        </mxCell>
+
+        <!-- Speed Layer band -->
+        <mxCell id="speed-band" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="70" width="1520" height="220" as="geometry"/>
+        </mxCell>
+        <mxCell id="speed-label" value="⚡ SPEED LAYER  (real-time)" style="text;html=1;align=left;verticalAlign=top;fontSize=16;fontStyle=1;fontColor=#1a3c6e;" vertex="1" parent="1">
+          <mxGeometry x="55" y="78" width="300" height="28" as="geometry"/>
+        </mxCell>
+
+        <!-- Batch Layer band -->
+        <mxCell id="batch-band" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="310" width="1050" height="370" as="geometry"/>
+        </mxCell>
+        <mxCell id="batch-label" value="🔄 BATCH LAYER  (Airflow DAGs → Spark Cluster)" style="text;html=1;align=left;verticalAlign=top;fontSize=16;fontStyle=1;fontColor=#2d5a1e;" vertex="1" parent="1">
+          <mxGeometry x="55" y="318" width="450" height="28" as="geometry"/>
+        </mxCell>
+
+        <!-- Serving Layer band -->
+        <mxCell id="serving-band" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="310" width="450" height="370" as="geometry"/>
+        </mxCell>
+        <mxCell id="serving-label" value="📊 SERVING LAYER" style="text;html=1;align=left;verticalAlign=top;fontSize=16;fontStyle=1;fontColor=#7a5c00;" vertex="1" parent="1">
+          <mxGeometry x="1125" y="318" width="220" height="28" as="geometry"/>
+        </mxCell>
+
+        <!-- AWS Cloud band -->
+        <mxCell id="aws-band" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce5cd;strokeColor=#d79b00;strokeWidth=2;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="700" width="1520" height="260" as="geometry"/>
+        </mxCell>
+        <mxCell id="aws-label" value="☁️ AWS Cloud" style="text;html=1;align=left;verticalAlign=top;fontSize=16;fontStyle=1;fontColor=#7a4700;" vertex="1" parent="1">
+          <mxGeometry x="55" y="708" width="200" height="28" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- SPEED LAYER COMPONENTS                                 -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <!-- Alpha Vantage API -->
+        <mxCell id="alphavantage" value="&lt;b&gt;Alpha Vantage&lt;/b&gt;&lt;br&gt;Quotes API" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.general_SDK;labelBackgroundColor=none;sketch=0;fillColor=#D45B07;fontColor=#232F3E;fontSize=11;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="120" width="90" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- Kafka Producer -->
+        <mxCell id="kafka-producer" value="&lt;b&gt;Kafka&lt;br&gt;Producer&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;stock_producer.py&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.general_SDK;fillColor=#7B241C;fontColor=#FFFFFF;sketch=0;labelBackgroundColor=none;fontSize=10;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="220" y="120" width="90" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- Kafka Broker -->
+        <mxCell id="kafka" value="&lt;b&gt;Apache Kafka&lt;/b&gt;&lt;br&gt;+ Zookeeper&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;raw_stock_ticks&lt;br&gt;stock_indicators&lt;br&gt;stock_alerts&lt;/font&gt;" style="shape=hexagon;perimeter=hexagonPerimeter2;whiteSpace=wrap;html=1;fixedSize=1;fillColor=#1a1a2e;fontColor=#FFFFFF;strokeColor=#16213e;fontSize=10;size=20;" vertex="1" parent="1">
+          <mxGeometry x="370" y="115" width="140" height="100" as="geometry"/>
+        </mxCell>
+
+        <!-- Spark Streaming -->
+        <mxCell id="spark-streaming" value="&lt;b&gt;Spark Structured&lt;br&gt;Streaming&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;spark_streaming.py&lt;br&gt;micro-batch 30s&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.general_SDK;fillColor=#E65100;fontColor=#FFFFFF;sketch=0;labelBackgroundColor=none;fontSize=10;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="570" y="120" width="110" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- S3 Silver / stock_ticks -->
+        <mxCell id="s3-silver-ticks" value="&lt;b&gt;S3 silver/&lt;br&gt;stock_ticks&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Cleaned Parquet&lt;br&gt;year/month/day&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;labelBackgroundColor=none;sketch=0;fillColor=#3F8624;fontColor=#ffffff;fontSize=10;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="750" y="120" width="100" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- S3 Bronze -->
+        <mxCell id="s3-bronze" value="&lt;b&gt;S3 bronze/&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Raw JSON backup&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;labelBackgroundColor=none;sketch=0;fillColor=#CD7F32;fontColor=#ffffff;fontSize=10;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="220" y="230" width="90" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Speed layer arrows -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a3c6e;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="alphavantage" target="kafka-producer">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a3c6e;" edge="1" parent="1" source="kafka-producer" target="kafka">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a3c6e;" edge="1" parent="1" source="kafka" target="spark-streaming">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a3c6e;" edge="1" parent="1" source="spark-streaming" target="s3-silver-ticks">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <!-- Producer → Bronze backup -->
+        <mxCell id="e-bronze" value="raw backup" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#999999;dashed=1;fontSize=9;fontColor=#999999;" edge="1" parent="1" source="kafka-producer" target="s3-bronze">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- BATCH LAYER COMPONENTS                                 -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <!-- Airflow -->
+        <mxCell id="airflow" value="&lt;b&gt;Apache Airflow 2.8&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Scheduler + Webserver&lt;br&gt;PostgreSQL metadata&lt;br&gt;BashOperator → spark-submit&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.general_SDK;fillColor=#017CEE;fontColor=#FFFFFF;sketch=0;labelBackgroundColor=none;fontSize=10;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="360" width="130" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- Spark Cluster -->
+        <mxCell id="spark-cluster" value="&lt;b&gt;Spark Cluster&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Master + Worker&lt;br&gt;Spark 3.5.3&lt;br&gt;Python 3.11 + JDK 21&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.general_SDK;fillColor=#E65100;fontColor=#FFFFFF;sketch=0;labelBackgroundColor=none;fontSize=10;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="480" width="130" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Airflow → Spark -->
+        <mxCell id="e-af-spark" value="spark-submit" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#2d5a1e;fontSize=9;fontColor=#2d5a1e;" edge="1" parent="1" source="airflow" target="spark-cluster">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Tick Rollup -->
+        <mxCell id="tick-rollup" value="&lt;b&gt;Tick Rollup&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;ticks → daily OHLCV&lt;br&gt;partition-pruned&lt;br&gt;Weekdays 06:00&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#43A047;fontSize=10;fontColor=#1B5E20;" vertex="1" parent="1">
+          <mxGeometry x="230" y="355" width="150" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- Daily Aggregation -->
+        <mxCell id="daily-agg" value="&lt;b&gt;Daily Aggregation&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;SMA, EMA, RSI, MACD&lt;br&gt;signals, sectors, corr&lt;br&gt;Weekdays 07:00&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#43A047;fontSize=10;fontColor=#1B5E20;" vertex="1" parent="1">
+          <mxGeometry x="430" y="355" width="160" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- S3 Silver / historical -->
+        <mxCell id="s3-silver-hist" value="&lt;b&gt;S3 silver/&lt;br&gt;historical&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Daily OHLCV Parquet&lt;br&gt;symbol/year/month&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;labelBackgroundColor=none;sketch=0;fillColor=#3F8624;fontColor=#ffffff;fontSize=10;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="640" y="350" width="100" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Data Quality Checks -->
+        <mxCell id="dq-checks" value="&lt;b&gt;Data Quality&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;freshness, nulls,&lt;br&gt;completeness, schema&lt;br&gt;Weekdays 08:00&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFECB3;strokeColor=#FF8F00;fontSize=10;fontColor=#E65100;" vertex="1" parent="1">
+          <mxGeometry x="430" y="450" width="160" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- Fundamental Refresh -->
+        <mxCell id="fundamental" value="&lt;b&gt;Fundamental Refresh&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;P/E, market cap, EPS&lt;br&gt;yfinance + Yahoo API&lt;br&gt;Weekly Sun 06:00&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#43A047;fontSize=10;fontColor=#1B5E20;" vertex="1" parent="1">
+          <mxGeometry x="230" y="450" width="160" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- Delta Maintenance -->
+        <mxCell id="delta-maint" value="&lt;b&gt;Delta Maintenance&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;OPTIMIZE + VACUUM&lt;br&gt;Last Sun of month 04:00&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1BEE7;strokeColor=#8E24AA;fontSize=10;fontColor=#4A148C;" vertex="1" parent="1">
+          <mxGeometry x="230" y="540" width="160" height="55" as="geometry"/>
+        </mxCell>
+
+        <!-- Initial Backfill -->
+        <mxCell id="backfill" value="&lt;b&gt;Historical Backfill&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;yfinance 5-year seed&lt;br&gt;Manual (one-time)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#B3E5FC;strokeColor=#0288D1;fontSize=10;fontColor=#01579B;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="230" y="610" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Batch layer arrows -->
+        <mxCell id="e-tr-agg" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#2d5a1e;" edge="1" parent="1" source="tick-rollup" target="daily-agg">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-tr-silver" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#999999;dashed=1;" edge="1" parent="1" source="tick-rollup" target="s3-silver-hist">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-ticks-tr" value="reads" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#666666;dashed=1;fontSize=9;fontColor=#666666;" edge="1" parent="1" source="s3-silver-ticks" target="tick-rollup">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- S3 GOLD LAYER (Delta Lake)                             -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <mxCell id="s3-gold" value="&lt;b&gt;S3 gold/ — Delta Lake 3.2&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;▸ daily_summaries&lt;br&gt;▸ sector_performance&lt;br&gt;▸ correlations&lt;br&gt;▸ fundamentals&lt;br&gt;▸ enriched_prices&lt;br&gt;&lt;br&gt;ACID · Time-Travel · MERGE&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;labelBackgroundColor=none;sketch=0;fillColor=#3F8624;fontColor=#ffffff;fontSize=11;whiteSpace=wrap;html=1;spacingTop=2;" vertex="1" parent="1">
+          <mxGeometry x="810" y="355" width="160" height="170" as="geometry"/>
+        </mxCell>
+
+        <!-- Agg → Gold -->
+        <mxCell id="e-agg-gold" value="MERGE" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#2d5a1e;fontSize=9;fontColor=#2d5a1e;" edge="1" parent="1" source="daily-agg" target="s3-gold">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <!-- Fundamental → Gold -->
+        <mxCell id="e-fund-gold" value="MERGE" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#2d5a1e;fontSize=9;fontColor=#2d5a1e;" edge="1" parent="1" source="fundamental" target="s3-gold">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <!-- Delta Maintenance → Gold -->
+        <mxCell id="e-dm-gold" value="OPTIMIZE&#xa;VACUUM" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#8E24AA;dashed=1;fontSize=9;fontColor=#8E24AA;" edge="1" parent="1" source="delta-maint" target="s3-gold">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <!-- Backfill → Gold -->
+        <mxCell id="e-bf-gold" value="--mode full" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#0288D1;dashed=1;fontSize=9;fontColor=#0288D1;" edge="1" parent="1" source="backfill" target="s3-gold">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- SERVING LAYER (Dashboard)                              -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <!-- Streamlit app -->
+        <mxCell id="streamlit" value="&lt;b&gt;Streamlit Dashboard&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;:8501&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.general_SDK;fillColor=#FF4B4B;fontColor=#FFFFFF;sketch=0;labelBackgroundColor=none;fontSize=12;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="350" width="110" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- Dashboard pages -->
+        <mxCell id="dash-live" value="&lt;b&gt;Live Data&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Real-time prices&lt;br&gt;Intraday charts&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=10;fontColor=#F57F17;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="450" width="120" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="dash-overview" value="&lt;b&gt;Overview&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Signals board&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=10;fontColor=#F57F17;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="450" width="110" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="dash-detail" value="&lt;b&gt;Stock Detail&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Candlestick, RSI&lt;br&gt;Fundamentals&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=10;fontColor=#F57F17;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="520" width="120" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="dash-sector" value="&lt;b&gt;Sector Analysis&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Heatmaps, corr&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=10;fontColor=#F57F17;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="520" width="110" height="55" as="geometry"/>
+        </mxCell>
+
+        <!-- Gold → Dashboard -->
+        <mxCell id="e-gold-dash" value="deltalake reader" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#7a5c00;fontSize=9;fontColor=#7a5c00;" edge="1" parent="1" source="s3-gold" target="streamlit">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <!-- Silver ticks → Dashboard Live -->
+        <mxCell id="e-ticks-dash" value="live read" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a3c6e;fontSize=9;fontColor=#1a3c6e;" edge="1" parent="1" source="s3-silver-ticks" target="dash-live">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="800" y="250"/>
+              <mxPoint x="1100" y="250"/>
+              <mxPoint x="1100" y="478"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- AWS CLOUD LAYER                                        -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <!-- S3 Bucket -->
+        <mxCell id="s3-bucket" value="&lt;b&gt;Amazon S3&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;stock-market-pipeline-datalake&lt;br&gt;Medallion: bronze → silver → gold&lt;/font&gt;" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#3F8624;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.s3;" vertex="1" parent="1">
+          <mxGeometry x="100" y="750" width="78" height="78" as="geometry"/>
+        </mxCell>
+
+        <!-- Glue Catalog -->
+        <mxCell id="glue" value="&lt;b&gt;AWS Glue&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Data Catalog&lt;br&gt;bronze / silver / gold&lt;br&gt;databases &amp; tables&lt;/font&gt;" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.glue;" vertex="1" parent="1">
+          <mxGeometry x="350" y="750" width="78" height="78" as="geometry"/>
+        </mxCell>
+
+        <!-- Athena -->
+        <mxCell id="athena" value="&lt;b&gt;Amazon Athena&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;SQL-on-S3&lt;br&gt;Serverless queries&lt;/font&gt;" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.athena;" vertex="1" parent="1">
+          <mxGeometry x="600" y="750" width="78" height="78" as="geometry"/>
+        </mxCell>
+
+        <!-- CloudFormation -->
+        <mxCell id="cfn" value="&lt;b&gt;CloudFormation&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;IaC templates&lt;br&gt;S3, Glue, IAM, Athena&lt;/font&gt;" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#E7157B;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.cloudformation;" vertex="1" parent="1">
+          <mxGeometry x="850" y="750" width="78" height="78" as="geometry"/>
+        </mxCell>
+
+        <!-- IAM -->
+        <mxCell id="iam" value="&lt;b&gt;IAM Roles&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Least-privilege&lt;br&gt;access policies&lt;/font&gt;" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#DD344C;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.role;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="750" width="78" height="78" as="geometry"/>
+        </mxCell>
+
+        <!-- GitHub Actions CI/CD -->
+        <mxCell id="cicd" value="&lt;b&gt;GitHub Actions&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;CI: lint, test, build&lt;br&gt;CD: deploy, teardown&lt;/font&gt;" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.general_SDK;fillColor=#24292e;fontColor=#FFFFFF;sketch=0;labelBackgroundColor=none;fontSize=10;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1350" y="760" width="120" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- AWS arrows -->
+        <mxCell id="e-s3-glue" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#8C4FFF;dashed=1;" edge="1" parent="1" source="s3-bucket" target="glue">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-glue-athena" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#8C4FFF;dashed=1;" edge="1" parent="1" source="glue" target="athena">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -16,32 +16,149 @@ and surfaces interactive dashboards — **live** and **historical** — via
 
 ## Architecture (Lambda Architecture)
 
+![Architecture Diagram](docs/architecture.drawio.svg)
+
+> **[Open in draw.io →](docs/architecture.drawio)** for the editable version.
+
+<details>
+<summary><b>ASCII version</b> (click to expand)</summary>
+
 ```
-                           SPEED LAYER (real-time)
-┌────────────────┐   ┌───────────┐   ┌──────────────────┐   ┌────────────────────┐
-│  Alpha Vantage │──▶│   Kafka   │──▶│  Spark Structured │──▶│ S3 silver/          │
-│  (quotes API)  │   │  Broker   │   │  Streaming        │   │ stock_ticks         │
-└───────┬────────┘   └───────────┘   └──────────────────┘   │ (cleaned Parquet)   │
-        │                                                    └────────┬───────────┘
-        │  raw backup                                                 │
-        └──────────▶ S3 bronze/                      ┌────────────────┤
-                                                     │ Dashboard      │
-                           BATCH LAYER               │ Live Data tab  │
-┌──────────────────────────────────────────┐         └────────────────┘
-│  Airflow DAGs (daily)                    │
-│                                          │
-│  ┌─────────────────┐  ┌───────────────┐  │
-│  │ Tick Rollup     │  │ Daily         │  │   ┌────────────────────┐
-│  │ ticks → daily   │─▶│ Aggregation   │──│──▶│ S3 gold/           │
-│  │ OHLCV bars      │  │ + Enrichment  │  │   │ (indicators,       │
-│  └─────────────────┘  └───────────────┘  │   │  signals, sector)  │
-│                                          │   └────────┬───────────┘
-└──────────────────────────────────────────┘            │
-                                              ┌────────┴───────────┐
-   One-time seed:                             │ Dashboard          │
-   yfinance 5-year ──▶ S3 silver/historical   │ Historical tabs    │
-                                              └────────────────────┘
+                              SPEED LAYER (real-time)
+ ┌────────────────┐   ┌───────────┐   ┌──────────────────┐   ┌─────────────────────┐
+ │  Alpha Vantage │──▶│   Kafka   │──▶│  Spark Structured │──▶│  S3 silver/          │
+ │  (quotes API)  │   │  Broker   │   │  Streaming        │   │  stock_ticks         │
+ └───────┬────────┘   └───────────┘   └──────────────────┘   │  (cleaned Parquet)   │
+         │                                                    └──────────┬───────────┘
+         │  raw backup                                                   │
+         └──────────▶ S3 bronze/                        ┌────────────────┤
+                                                        │  Streamlit     │
+                              BATCH LAYER               │  Live Data     │
+ ┌──────────────────────────────────────────────────┐   └────────────────┘
+ │  Airflow DAGs  ──▶  Spark Cluster (spark-submit) │
+ │                                                  │
+ │  ┌─────────────────┐  ┌───────────────────────┐  │   ┌─────────────────────────┐
+ │  │ Tick Rollup     │  │ Daily Aggregation     │  │   │  S3 gold/ (Delta Lake)  │
+ │  │ ticks → daily   │─▶│ indicators, signals,  │──│──▶│  daily_summaries        │
+ │  │ OHLCV bars      │  │ sectors, correlations │  │   │  sector_performance     │
+ │  └─────────────────┘  └───────────────────────┘  │   │  correlations           │
+ │                                                  │   │  fundamentals           │
+ │  ┌─────────────────┐  ┌───────────────────────┐  │   │  enriched_prices        │
+ │  │ Fundamental     │  │ Data Quality Checks   │  │   └────────────┬────────────┘
+ │  │ Refresh (weekly)│  │ freshness, nulls,     │  │                │
+ │  └────────┬────────┘  │ completeness, schema  │  │   ┌────────────┴────────────┐
+ │           │           └───────────────────────┘  │   │  Streamlit Dashboard    │
+ │  ┌────────▼────────┐  ┌───────────────────────┐  │   │  Overview · Detail      │
+ │  │ Delta           │  │ Delta Maintenance     │  │   │  Sector Analysis        │
+ │  │ MERGE (upsert)  │  │ OPTIMIZE + VACUUM     │  │   │  (deltalake reader)     │
+ │  └─────────────────┘  │ (last Sun of month)   │  │   └─────────────────────────┘
+ │                        └───────────────────────┘  │
+ └──────────────────────────────────────────────────┘
+                                                        ┌─────────────────────────┐
+    One-time seed:                                      │  AWS Glue Catalog       │
+    yfinance 5-year ──▶ S3 bronze/ + silver/historical  │  + Athena (SQL on S3)   │
+    then ──▶ gold/ (--mode full) + fundamentals         └─────────────────────────┘
 ```
+
+</details>
+
+<details>
+<summary><b>Visual Architecture Diagram</b> (click to expand)</summary>
+
+```mermaid
+flowchart TB
+    subgraph DOCKER["🐳 Docker Compose Environment"]
+        direction TB
+
+        subgraph SPEED["⚡ SPEED LAYER — Real-Time"]
+            direction LR
+            AV["🌐 Alpha Vantage\nQuotes API"]
+            KP["📡 Kafka Producer\nstock_producer.py"]
+            KAFKA["🔀 Apache Kafka\n+ Zookeeper\nraw_stock_ticks\nstock_indicators\nstock_alerts"]
+            SS["⚡ Spark Structured\nStreaming\nmicro-batch 30s"]
+            S3_ST["🪣 S3 silver/stock_ticks\nCleaned Parquet\nyear/month/day"]
+
+            AV -->|"polls every 60s"| KP
+            KP -->|"publishes JSON"| KAFKA
+            KAFKA -->|"consumes"| SS
+            SS -->|"writes Parquet"| S3_ST
+        end
+
+        KP -.->|"raw backup"| S3_BR["🪣 S3 bronze/\nRaw JSON"]
+
+        subgraph BATCH["🔄 BATCH LAYER — Airflow DAGs → Spark Cluster"]
+            direction TB
+            AF["🗓️ Apache Airflow 2.8\nScheduler + Webserver\nBashOperator"]
+            SC["⚙️ Spark Cluster\nMaster + Worker\nSpark 3.5.3 • Python 3.11"]
+            AF -->|"spark-submit"| SC
+
+            subgraph DAGS["Scheduled Jobs"]
+                direction LR
+                TR["📊 Tick Rollup\nticks → OHLCV\nWeekdays 06:00"]
+                DA["📈 Daily Aggregation\nSMA, RSI, MACD\nWeekdays 07:00"]
+                DQ["✅ Data Quality\nfreshness, nulls\nWeekdays 08:00"]
+                FR["💰 Fundamental Refresh\nP/E, market cap\nSunday 06:00"]
+                DM["🔧 Delta Maintenance\nOPTIMIZE + VACUUM\nLast Sun/month"]
+                BF["📥 Historical Backfill\nyfinance 5-year\nManual one-time"]
+            end
+        end
+
+        S3_ST -.->|"reads ticks"| TR
+        TR -->|"appends"| S3_SH["🪣 S3 silver/historical\nDaily OHLCV Parquet"]
+        S3_SH --> DA
+
+        subgraph GOLD["🥇 S3 gold/ — Delta Lake 3.2"]
+            direction TB
+            DS["daily_summaries"]
+            SP["sector_performance"]
+            CR["correlations"]
+            FN["fundamentals"]
+            EP["enriched_prices"]
+        end
+
+        DA -->|"MERGE"| GOLD
+        FR -->|"MERGE"| GOLD
+        DM -.->|"OPTIMIZE\nVACUUM"| GOLD
+        BF -.->|"--mode full"| GOLD
+
+        subgraph SERVE["📊 SERVING LAYER — Streamlit :8501"]
+            direction LR
+            ST["🖥️ Streamlit Dashboard"]
+            PG1["Live Data\nReal-time prices"]
+            PG2["Overview\nSignals board"]
+            PG3["Stock Detail\nCandlestick, RSI"]
+            PG4["Sector Analysis\nHeatmaps, corr"]
+            ST --- PG1 & PG2 & PG3 & PG4
+        end
+
+        S3_ST -->|"live read"| PG1
+        GOLD -->|"deltalake reader"| ST
+    end
+
+    subgraph AWS["☁️ AWS Cloud"]
+        direction LR
+        S3["🪣 Amazon S3\nMedallion Lake"]
+        GLUE["📚 AWS Glue\nData Catalog"]
+        ATH["🔍 Amazon Athena\nSQL-on-S3"]
+        CFN["📋 CloudFormation\nIaC Templates"]
+        IAM["🔒 IAM Roles\nLeast-privilege"]
+        S3 -.-> GLUE -.-> ATH
+    end
+
+    subgraph CICD["🔁 CI/CD"]
+        GHA["⚙️ GitHub Actions\nlint • test • build\ndeploy • teardown"]
+    end
+
+    style SPEED fill:#dae8fc,stroke:#6c8ebf,stroke-width:2px
+    style BATCH fill:#d5e8d4,stroke:#82b366,stroke-width:2px
+    style GOLD fill:#e8f5e9,stroke:#43a047,stroke-width:2px
+    style SERVE fill:#fff2cc,stroke:#d6b656,stroke-width:2px
+    style AWS fill:#fce5cd,stroke:#d79b00,stroke-width:2px
+    style CICD fill:#f5f5f5,stroke:#666,stroke-width:1px
+    style DOCKER fill:#f0f7ff,stroke:#666,stroke-width:2px,stroke-dasharray:5 5
+```
+
+</details>
 
 ---
 
@@ -205,6 +322,7 @@ Real-Time-Stock-Market-Analysis/
 │   ├── daily_tick_rollup.py       # Roll up real-time ticks → daily OHLCV bars
 │   ├── daily_batch_aggregation.py # Indicators, signals, enrichment → gold
 │   ├── data_quality_checks.py     # Freshness, completeness, null, schema
+│   ├── delta_maintenance.py       # Monthly OPTIMIZE + VACUUM on gold Delta tables
 │   ├── fundamental_data_refresh.py# Weekly fundamentals refresh
 │   └── initial_historical_backfill.py  # One-time 5-year seed (manual)
 ├── dashboards/                # Streamlit analytics dashboard
@@ -233,9 +351,10 @@ Real-Time-Stock-Market-Analysis/
 │   └── setup-local.sh
 ├── src/                       # Application source code
 │   ├── batch/                 # PySpark batch jobs
-│   │   ├── tick_rollup.py         # Roll up ticks → daily OHLCV
+│   │   ├── tick_rollup.py         # Roll up ticks → daily OHLCV (partition-pruned)
 │   │   ├── daily_aggregation.py   # Technical indicators & signals
 │   │   ├── fundamental_enrichment.py # P/E, market cap enrichment
+│   │   ├── delta_maintenance.py   # Monthly OPTIMIZE + VACUUM
 │   │   └── historical_backfill.py # One-time 5-year seed
 │   ├── common/                # Shared utilities
 │   │   ├── indicators.py      # Technical indicator functions
@@ -253,7 +372,7 @@ Real-Time-Stock-Market-Analysis/
 │   ├── integration/           # Integration tests
 │   │   ├── test_kafka_spark_flow.py
 │   │   └── test_s3_write_read.py
-│   └── unit/                  # Unit tests (8 modules)
+│   └── unit/                  # Unit tests (10 modules)
 ├── .env.example               # Environment variable template
 ├── LICENSE                    # MIT License
 ├── Makefile                   # Developer task runner
@@ -284,7 +403,11 @@ Real-Time-Stock-Market-Analysis/
 
 4. **Tick Rollup** — `tick_rollup.py` (06:00 UTC) reads real-time ticks from
    `silver/stock_ticks`, aggregates to daily OHLCV bars per symbol, deduplicates
-   against existing data, and appends to `silver/historical`.
+   against existing data, and appends to `silver/historical`.  Optimised with
+   **partition pruning**: the `--date` argument (default: Airflow execution date)
+   restricts the read to a single day partition (`year/month/day`) instead of
+   scanning the entire tick history.  The deduplication join is similarly scoped
+   to the target month in `silver/historical`.
 
 5. **Aggregation** — `daily_aggregation.py` (07:00 UTC) reads `silver/historical`,
    computes SMA, EMA, RSI, MACD, generates trading signals, builds sector
@@ -308,7 +431,7 @@ Real-Time-Stock-Market-Analysis/
    bootstrap the Delta Lake gold tables.
 ### Orchestration
 
-8. **Airflow DAGs** — Five DAGs schedule all work.  All Spark jobs are
+8. **Airflow DAGs** — Six DAGs schedule all work.  All Spark jobs are
    submitted to the standalone Spark cluster via `spark-submit` (using
    `BashOperator`), configured through a shared helper
    (`dags/spark_submit_config.py`).  This ensures the Airflow scheduler
@@ -317,10 +440,11 @@ Real-Time-Stock-Market-Analysis/
    | DAG | Schedule | Purpose |
    |-----|----------|---------|
    | `initial_historical_backfill` | Manual (one-time) | Seed 5-year OHLCV history + bootstrap gold Delta tables (`--mode full`) |
-   | `daily_tick_rollup` | Daily 06:00 UTC | Ticks → daily OHLCV bars |
-   | `daily_batch_aggregation` | Daily 07:00 UTC | Incremental indicators + enrichment → gold (`--mode daily`) |
-   | `data_quality_checks` | Daily 08:00 UTC | Freshness, completeness, nulls |
-   | `fundamental_data_refresh` | Weekly Sun 06:00 | Refresh company fundamentals (Delta MERGE) |
+   | `daily_tick_rollup` | Weekdays 06:00 UTC | Ticks → daily OHLCV bars (partition-pruned via `--date {{ ds }}`) |
+   | `daily_batch_aggregation` | Weekdays 07:00 UTC | Incremental indicators + enrichment → gold (`--mode daily`) |
+   | `data_quality_checks` | Weekdays 08:00 UTC | Freshness, completeness, nulls |
+   | `fundamental_data_refresh` | Weekly Sun 06:00 UTC | Refresh company fundamentals (Delta MERGE) |
+   | `delta_maintenance` | Last Sun of month 04:00 UTC | OPTIMIZE + VACUUM on all gold Delta tables |
 
 ### Serving Layer
 
@@ -389,6 +513,19 @@ The Streamlit dashboard reads gold Delta tables using the lightweight
 `deltalake` Python package (0.17) — no Spark required.  It falls back to
 Parquet, then generates demo data if S3 is unreachable.
 
+### Monthly Maintenance
+
+The `delta_maintenance` DAG (1st of every month at 04:00 UTC) runs
+`delta_maintenance.py` against all 5 gold tables:
+
+| Operation | What It Does |
+|-----------|--------------|
+| **OPTIMIZE** | Compacts small files produced by daily MERGEs into fewer, larger Parquet files — improves read performance |
+| **VACUUM** | Removes data files no longer referenced by the Delta log and older than 7 days (configurable via `--retention-hours`) — reclaims S3 storage |
+| **History log** | Logs the current Delta version and transaction history length for observability |
+
+Tables that don't exist yet are automatically skipped.
+
 ---
 
 ## Key Insights Generated
@@ -435,13 +572,14 @@ pytest tests/unit -v --cov=src --cov-report=term-missing --cov-fail-under=80
 pytest tests/integration -v
 ```
 
-The test suite covers 9 modules (235 tests):
+The test suite covers 10 modules (259 tests):
 - Technical indicator calculations
 - Pydantic schema validation
 - S3 utility functions
 - Kafka producer logic
 - Spark streaming consumer
 - PySpark batch jobs (backfill, aggregation, enrichment, tick rollup)
+- Delta Lake maintenance (OPTIMIZE, VACUUM, history)
 
 ---
 

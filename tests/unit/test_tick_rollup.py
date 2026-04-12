@@ -5,9 +5,12 @@ OHLCV aggregation, deduplication, writing, and pipeline orchestration.
 """
 
 from unittest.mock import MagicMock, patch
+from datetime import date, timedelta, datetime, timezone
 
 from src.batch.tick_rollup import (
     DAILY_OHLCV_SCHEMA,
+    _parse_target_date,
+    _partition_path,
     deduplicate_against_existing,
     read_tick_data,
     rollup_ticks_to_daily,
@@ -94,6 +97,57 @@ class TestDailyOHLCVSchema:
 
 
 # ---------------------------------------------------------------------------
+# _partition_path tests
+# ---------------------------------------------------------------------------
+
+
+class TestPartitionPath:
+    """Tests for the partition path builder."""
+
+    def test_builds_correct_path(self) -> None:
+        """Generates year/month/day partition path."""
+        result = _partition_path("s3a://bucket/silver/stock_ticks", date(2026, 4, 12))
+        assert result == "s3a://bucket/silver/stock_ticks/year=2026/month=04/day=12"
+
+    def test_zero_pads_single_digit_month_day(self) -> None:
+        """Month and day are zero-padded to 2 digits."""
+        result = _partition_path("s3a://b/ticks", date(2026, 1, 5))
+        assert result == "s3a://b/ticks/year=2026/month=01/day=05"
+
+
+# ---------------------------------------------------------------------------
+# _parse_target_date tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseTargetDate:
+    """Tests for CLI --date argument parsing."""
+
+    def test_none_returns_yesterday(self) -> None:
+        """None defaults to yesterday's date."""
+        expected = datetime.now(timezone.utc).date() - timedelta(days=1)
+        assert _parse_target_date(None) == expected
+
+    def test_yesterday_string(self) -> None:
+        """'yesterday' returns yesterday's date."""
+        expected = datetime.now(timezone.utc).date() - timedelta(days=1)
+        assert _parse_target_date("yesterday") == expected
+
+    def test_all_returns_none(self) -> None:
+        """'all' returns None (full-scan mode)."""
+        assert _parse_target_date("all") is None
+
+    def test_all_case_insensitive(self) -> None:
+        """'ALL' and 'All' also return None."""
+        assert _parse_target_date("ALL") is None
+        assert _parse_target_date("All") is None
+
+    def test_explicit_date(self) -> None:
+        """Explicit YYYY-MM-DD is parsed correctly."""
+        assert _parse_target_date("2026-04-12") == date(2026, 4, 12)
+
+
+# ---------------------------------------------------------------------------
 # read_tick_data tests
 # ---------------------------------------------------------------------------
 
@@ -111,6 +165,21 @@ class TestReadTickData:
 
         mock_spark.read.parquet.assert_called_once_with(
             "s3a://bucket/silver/stock_ticks"
+        )
+        assert result is mock_df
+
+    def test_reads_partition_when_date_provided(self) -> None:
+        """Reads only the day partition when target_date is given."""
+        mock_spark = MagicMock()
+        mock_df = MagicMock()
+        mock_spark.read.parquet.return_value = mock_df
+
+        result = read_tick_data(
+            mock_spark, "s3a://bucket/silver/stock_ticks", date(2026, 4, 11)
+        )
+
+        mock_spark.read.parquet.assert_called_once_with(
+            "s3a://bucket/silver/stock_ticks/year=2026/month=04/day=11"
         )
         assert result is mock_df
 
@@ -215,6 +284,35 @@ class TestDeduplicateAgainstExisting:
         )
         assert result is deduped
 
+    @patch("src.batch.tick_rollup.F", new_callable=_make_fake_F)
+    def test_filters_by_year_month_when_date_provided(self, mock_f: MagicMock) -> None:
+        """When target_date is given, only matching year/month partitions are read."""
+        mock_new = MagicMock()
+        mock_new.isEmpty.return_value = False
+        deduped = MagicMock()
+        mock_new.join.return_value = deduped
+        deduped.count.return_value = 0
+
+        mock_existing = MagicMock()
+        mock_filtered = MagicMock()
+        mock_existing.filter.return_value = mock_filtered
+        mock_keys = MagicMock()
+        mock_filtered.select.return_value = mock_keys
+        mock_keys.distinct.return_value = mock_keys
+
+        mock_spark = MagicMock()
+        mock_spark.read.parquet.return_value = mock_existing
+
+        target = date(2026, 4, 11)
+        deduplicate_against_existing(
+            mock_new, "s3a://path", mock_spark, target_date=target
+        )
+
+        # Should filter existing data on partition columns
+        mock_existing.filter.assert_called_once()
+        # Dedup join should use the filtered DataFrame
+        mock_filtered.select.assert_called_once_with("symbol", "date")
+
 
 # ---------------------------------------------------------------------------
 # write_daily_bars tests
@@ -287,19 +385,54 @@ class TestRunTickRollup:
         mock_write.return_value = 5
         mock_spark = MagicMock()
 
-        result = run_tick_rollup(spark=mock_spark)
+        result = run_tick_rollup(spark=mock_spark, target_date_str="all")
 
         mock_read.assert_called_once_with(
-            mock_spark, "s3a://test-bucket/silver/stock_ticks"
+            mock_spark, "s3a://test-bucket/silver/stock_ticks", None
         )
         mock_rollup.assert_called_once_with(mock_tick_df)
         mock_dedup.assert_called_once_with(
-            mock_daily_df, "s3a://test-bucket/silver/historical", mock_spark
+            mock_daily_df, "s3a://test-bucket/silver/historical", mock_spark, None
         )
         mock_write.assert_called_once_with(
             mock_deduped_df, "s3a://test-bucket/silver/historical"
         )
         assert result == 5
+
+    @patch("src.batch.tick_rollup.write_daily_bars")
+    @patch("src.batch.tick_rollup.deduplicate_against_existing")
+    @patch("src.batch.tick_rollup.rollup_ticks_to_daily")
+    @patch("src.batch.tick_rollup.read_tick_data")
+    @patch("src.batch.tick_rollup.get_settings")
+    def test_pipeline_with_specific_date(
+        self,
+        mock_settings: MagicMock,
+        mock_read: MagicMock,
+        mock_rollup: MagicMock,
+        mock_dedup: MagicMock,
+        mock_write: MagicMock,
+    ) -> None:
+        """Pipeline passes parsed date to read_tick_data."""
+        mock_settings.return_value.s3_bucket_name = "test-bucket"
+        mock_read.return_value = MagicMock()
+        mock_rollup.return_value = MagicMock()
+        mock_dedup.return_value = MagicMock()
+        mock_write.return_value = 3
+        mock_spark = MagicMock()
+
+        run_tick_rollup(spark=mock_spark, target_date_str="2026-04-11")
+
+        mock_read.assert_called_once_with(
+            mock_spark,
+            "s3a://test-bucket/silver/stock_ticks",
+            date(2026, 4, 11),
+        )
+        mock_dedup.assert_called_once_with(
+            mock_rollup.return_value,
+            "s3a://test-bucket/silver/historical",
+            mock_spark,
+            date(2026, 4, 11),
+        )
 
     @patch("src.batch.tick_rollup.create_spark_session")
     @patch("src.batch.tick_rollup.write_daily_bars")
