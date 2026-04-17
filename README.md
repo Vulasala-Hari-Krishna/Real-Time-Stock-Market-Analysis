@@ -415,10 +415,13 @@ Real-Time-Stock-Market-Analysis/
    two execution modes (see [Delta Lake / Gold Layer](#delta-lake--gold-layer)
    below).
 
-6. **Enrichment** — `fundamental_enrichment.py` joins gold data with P/E,
-   market cap, dividend yield using Delta Lake **MERGE** (upsert).  Uses
-   yfinance with an automatic fallback to the Yahoo Finance `quoteSummary` API
-   (crumb-authenticated) when the library is unavailable.
+6. **Enrichment** — `fundamental_enrichment.py` fetches company fundamentals
+   (P/E, market cap, dividend yield, beta, 52-week range) from yfinance with
+   an automatic fallback to the Yahoo Finance `quoteSummary` API
+   (crumb-authenticated).  Writes standalone fundamentals and enriched prices
+   to gold via Delta Lake **MERGE** (upsert).  Supports `--mode weekly`
+   (default, reads last 2 months of silver data) and `--mode full` (reads
+   everything, used by backfill).
 
 ### One-Time Seed
 
@@ -427,8 +430,8 @@ Real-Time-Stock-Market-Analysis/
    when the library is broken), writes bronze JSON + silver Parquet in
    Hive-style partitioning (`symbol=X/year=Y/month=M/`).  Run once at project
    setup via the `initial_historical_backfill` DAG (manual trigger).  The DAG
-   then calls `seed_gold_layer` (`--mode full`) and `seed_fundamentals` to
-   bootstrap the Delta Lake gold tables.
+   then calls `seed_gold_layer` (`--mode full`) and `seed_fundamentals`
+   (`--mode full`) to bootstrap the Delta Lake gold tables.
 ### Orchestration
 
 8. **Airflow DAGs** — Six DAGs schedule all work.  All Spark jobs are
@@ -441,9 +444,9 @@ Real-Time-Stock-Market-Analysis/
    |-----|----------|---------|
    | `initial_historical_backfill` | Manual (one-time) | Seed 5-year OHLCV history + bootstrap gold Delta tables (`--mode full`) |
    | `daily_tick_rollup` | Weekdays 06:00 UTC | Ticks → daily OHLCV bars (partition-pruned via `--date {{ ds }}`) |
-   | `daily_batch_aggregation` | Weekdays 07:00 UTC | Incremental indicators + enrichment → gold (`--mode daily`) |
+   | `daily_batch_aggregation` | Weekdays 07:00 UTC | Incremental indicators (`--mode daily`) + enrichment (`--mode weekly`) → gold |
    | `data_quality_checks` | Weekdays 08:00 UTC | Freshness, completeness, nulls |
-   | `fundamental_data_refresh` | Weekly Sun 06:00 UTC | Refresh company fundamentals (Delta MERGE) |
+   | `fundamental_data_refresh` | Weekly Sun 06:00 UTC | Refresh company fundamentals (`--mode weekly`, Delta MERGE) |
    | `delta_maintenance` | Last Sun of month 04:00 UTC | OPTIMIZE + VACUUM on all gold Delta tables |
 
 ### Serving Layer
@@ -486,10 +489,19 @@ for ACID transactions, schema enforcement, and incremental MERGE (upsert).
 
 ### Execution Modes
 
+**`daily_aggregation.py`**
+
 | Mode | CLI Flag | Behaviour | When Used |
 |------|----------|-----------|----------|
 | **Full** | `--mode full` | Reads **all** silver data, recomputes every indicator, overwrites gold tables (creates version 0) | One-time seed via `initial_historical_backfill` DAG |
 | **Daily** | `--mode daily` | Reads only the **last 12 months** (~250 trading days) of silver data via partition pruning, then **MERGE**s results into existing gold tables | Daily schedule via `daily_batch_aggregation` DAG |
+
+**`fundamental_enrichment.py`**
+
+| Mode | CLI Flag | Behaviour | When Used |
+|------|----------|-----------|----------|
+| **Full** | `--mode full` | Reads **all** silver data, joins with fundamentals, overwrites `enriched_prices` | One-time seed via `initial_historical_backfill` DAG |
+| **Weekly** | `--mode weekly` | Reads only the **last 2 months** of silver data (the MERGE only upserts the latest date's rows anyway) | Weekly via `fundamental_data_refresh` and daily via `daily_batch_aggregation` |
 
 ### MERGE Keys
 
@@ -503,9 +515,15 @@ for ACID transactions, schema enforcement, and incremental MERGE (upsert).
 
 ### Partition Pruning
 
-In **daily mode**, `read_silver_data()` applies a 12-month predicate
-(`year >= Y AND (year > Y OR month >= M)`) so Spark only reads recent
-partitions — typically pruning **~79%** of silver data on a 5-year history.
+- **`daily_aggregation.py`** — In daily mode, `read_silver_data()` applies a
+  12-month predicate (`year >= Y AND (year > Y OR month >= M)`) so Spark only
+  reads recent partitions — typically pruning **~79%** of silver data on a
+  5-year history.
+
+- **`fundamental_enrichment.py`** — In weekly mode, `read_silver_prices()`
+  applies a 2-month predicate.  Since `write_enriched_gold()` only MERGEs the
+  latest date's rows (~10 rows), the full 5-year read was wasted work —
+  pruning eliminates **~97%** of unnecessary I/O.
 
 ### Dashboard Reader
 
@@ -572,7 +590,7 @@ pytest tests/unit -v --cov=src --cov-report=term-missing --cov-fail-under=80
 pytest tests/integration -v
 ```
 
-The test suite covers 10 modules (259 tests):
+The test suite covers 10 modules (292 tests):
 - Technical indicator calculations
 - Pydantic schema validation
 - S3 utility functions

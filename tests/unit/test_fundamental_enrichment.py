@@ -11,10 +11,12 @@ import pytest
 from src.batch.fundamental_enrichment import (
     FUNDAMENTAL_FIELDS,
     FUNDAMENTALS_SCHEMA,
+    PARTITION_PRUNE_MONTHS,
     enrich_with_fundamentals,
     fetch_all_fundamentals,
     fetch_fundamentals,
     fundamentals_to_spark,
+    read_silver_prices,
     run_fundamental_enrichment,
     write_enriched_gold,
     write_fundamentals_gold,
@@ -392,3 +394,77 @@ class TestRunFundamentalEnrichment:
         run_fundamental_enrichment(mock_spark, mock_price_df, symbols=["AAPL"])
 
         mock_enrich.assert_called_once_with(mock_price_df, fund_df)
+
+
+# ---------------------------------------------------------------------------
+# Partition pruning tests
+# ---------------------------------------------------------------------------
+
+
+class TestPartitionPruneMonths:
+    """Tests for the PARTITION_PRUNE_MONTHS constant."""
+
+    def test_value(self) -> None:
+        """Weekly mode uses 2-month look-back window."""
+        assert PARTITION_PRUNE_MONTHS == 2
+
+
+class TestReadSilverPrices:
+    """Tests for the read_silver_prices function."""
+
+    def test_full_mode_reads_all(self) -> None:
+        """Full mode reads all data without filtering."""
+        mock_spark = MagicMock()
+        mock_df = MagicMock()
+        mock_spark.read.parquet.return_value = mock_df
+
+        result = read_silver_prices(
+            mock_spark, "s3a://bucket/silver/historical", mode="full"
+        )
+
+        mock_spark.read.parquet.assert_called_once_with(
+            "s3a://bucket/silver/historical"
+        )
+        mock_df.filter.assert_not_called()
+        assert result is mock_df
+
+    @patch("src.batch.fundamental_enrichment.F")
+    def test_weekly_mode_applies_filter(self, mock_f: MagicMock) -> None:
+        """Weekly mode applies a partition pruning filter."""
+        mock_col = MagicMock()
+        mock_f.col.return_value = mock_col
+        mock_col.__gt__ = MagicMock(return_value=MagicMock())
+        mock_col.__eq__ = MagicMock(return_value=MagicMock())
+        mock_col.__ge__ = MagicMock(return_value=MagicMock())
+
+        mock_spark = MagicMock()
+        mock_df = MagicMock()
+        mock_filtered = MagicMock()
+        mock_spark.read.parquet.return_value = mock_df
+        mock_df.filter.return_value = mock_filtered
+
+        result = read_silver_prices(
+            mock_spark, "s3a://bucket/silver/historical", mode="weekly"
+        )
+
+        mock_spark.read.parquet.assert_called_once()
+        mock_df.filter.assert_called_once()
+        assert result is mock_filtered
+
+    @patch("src.batch.fundamental_enrichment.F")
+    def test_default_mode_is_weekly(self, mock_f: MagicMock) -> None:
+        """Default mode applies partition pruning (weekly)."""
+        mock_col = MagicMock()
+        mock_f.col.return_value = mock_col
+        mock_col.__gt__ = MagicMock(return_value=MagicMock())
+        mock_col.__eq__ = MagicMock(return_value=MagicMock())
+        mock_col.__ge__ = MagicMock(return_value=MagicMock())
+
+        mock_spark = MagicMock()
+        mock_df = MagicMock()
+        mock_spark.read.parquet.return_value = mock_df
+        mock_df.filter.return_value = MagicMock()
+
+        read_silver_prices(mock_spark, "s3a://bucket/silver/historical")
+
+        mock_df.filter.assert_called_once()
