@@ -64,7 +64,8 @@ def initial_historical_backfill() -> None:
     seed_fundamentals = BashOperator(
         task_id="seed_fundamentals",
         bash_command=spark_submit_cmd(
-            "/opt/airflow/src/batch/fundamental_enrichment.py"
+            "/opt/airflow/src/batch/fundamental_enrichment.py",
+            extra_args="--mode full",
         ),
     )
 

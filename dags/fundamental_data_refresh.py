@@ -45,7 +45,8 @@ def fundamental_data_refresh() -> None:
     BashOperator(
         task_id="refresh_fundamentals",
         bash_command=spark_submit_cmd(
-            "/opt/airflow/src/batch/fundamental_enrichment.py"
+            "/opt/airflow/src/batch/fundamental_enrichment.py",
+            extra_args="--mode weekly",
         ),
     )
 

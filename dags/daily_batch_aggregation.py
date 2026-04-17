@@ -53,7 +53,8 @@ def daily_batch_aggregation() -> None:
     run_enrichment = BashOperator(
         task_id="run_enrichment",
         bash_command=spark_submit_cmd(
-            "/opt/airflow/src/batch/fundamental_enrichment.py"
+            "/opt/airflow/src/batch/fundamental_enrichment.py",
+            extra_args="--mode weekly",
         ),
     )
 

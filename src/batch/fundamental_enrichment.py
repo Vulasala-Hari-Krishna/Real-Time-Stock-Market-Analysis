@@ -5,10 +5,18 @@ sector, industry, 52-week high/low, earnings) from yfinance for every
 stock in the watchlist. Converts to a Spark DataFrame, joins with
 silver-layer price data, and writes the enriched output to the S3 gold
 layer as Parquet with snappy compression.
+
+Supports two execution modes via ``--mode``:
+
+- ``full``  — reads **all** silver data for the initial backfill.
+- ``weekly`` (default) — applies partition pruning to read only the
+  last 2 months of silver data, sufficient for the enriched_prices
+  MERGE that only upserts the latest date.
 """
 
+import argparse
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -277,6 +285,60 @@ def fundamentals_to_spark(
 
 
 # ------------------------------------------------------------------
+# Silver data reader with partition pruning
+# ------------------------------------------------------------------
+
+# In weekly mode we only need ~2 months of price data because
+# write_enriched_gold MERGEs just the max-date rows.
+PARTITION_PRUNE_MONTHS: int = 2
+
+
+def read_silver_prices(
+    spark: SparkSession, silver_path: str, *, mode: str = "weekly"
+) -> DataFrame:
+    """Read silver-layer OHLCV Parquet data with optional pruning.
+
+    In ``weekly`` mode (default), applies partition pruning to read
+    only the last 2 months of data.  This is sufficient because the
+    enriched_prices MERGE only upserts the latest date.
+
+    In ``full`` mode, reads everything for the initial backfill.
+
+    Args:
+        spark: Active SparkSession.
+        silver_path: S3a path to the silver Parquet directory.
+        mode: ``"full"`` to read all data or ``"weekly"`` (default)
+            to apply partition pruning.
+
+    Returns:
+        Spark DataFrame with OHLCV columns.
+    """
+    df = spark.read.parquet(silver_path)
+
+    if mode == "weekly":
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=PARTITION_PRUNE_MONTHS * 31
+        )
+        cutoff_year = cutoff.year
+        cutoff_month = cutoff.month
+        df = df.filter(
+            (F.col("year") > cutoff_year)
+            | ((F.col("year") == cutoff_year) & (F.col("month") >= cutoff_month))
+        )
+        logger.info(
+            "Read silver prices from %s with partition pruning "
+            "(year >= %d, month >= %d)",
+            silver_path,
+            cutoff_year,
+            cutoff_month,
+        )
+    else:
+        logger.info("Read ALL silver prices from %s (full mode)", silver_path)
+
+    return df
+
+
+# ------------------------------------------------------------------
 # Spark join
 # ------------------------------------------------------------------
 
@@ -408,10 +470,21 @@ def run_fundamental_enrichment(
 
 def main() -> None:
     """Entry point for the fundamental enrichment batch job."""
+    parser = argparse.ArgumentParser(description="Fundamental enrichment")
+    parser.add_argument(
+        "--mode",
+        choices=["full", "weekly"],
+        default="weekly",
+        help="'full' reads all silver data (backfill), "
+        "'weekly' prunes to last 2 months (default).",
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    logger.info("Starting fundamental enrichment in %s mode", args.mode)
     settings = get_settings()
     spark = create_spark_session()
 
@@ -420,7 +493,7 @@ def main() -> None:
         silver_path = f"s3a://{bucket}/silver/historical"
         gold_path = f"s3a://{bucket}/gold"
 
-        price_df = spark.read.parquet(silver_path)
+        price_df = read_silver_prices(spark, silver_path, mode=args.mode)
         outputs = run_fundamental_enrichment(spark, price_df)
         write_fundamentals_gold(spark, outputs["fundamentals"], gold_path)
         write_enriched_gold(spark, outputs["enriched"], gold_path)
