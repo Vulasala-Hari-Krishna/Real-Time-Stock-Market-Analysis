@@ -237,18 +237,20 @@ the legacy bucket-wide user and assume that removes its existing broad grants.
 
 | Resource ownership | Tool and implementation status |
 |--------------------|--------------------------------|
-| AWS S3, IAM policies, future platform trust roles | CloudFormation; S3/access-policy templates prepared |
-| Databricks platform objects and permissions | Terraform planned after account/capability checks |
+| AWS S3, IAM policies, Unity Catalog trust role | CloudFormation templates prepared; role starts with trust disabled |
+| Databricks platform objects and permissions | Staged credential/workspace Terraform roots prepared, not applied |
 | Databricks jobs and code deployments | Manual quote-slice bundle and wheel implemented, not deployed |
 | Snowflake warehouse, integrations, roles and database/schema containers | Terraform planned |
 | Snowflake tables, views, marts, schema evolution | Versioned SQL migrations planned |
 
 Give every object and grant one owner; do not manage the same resource through
 Terraform and bundles/SQL. Pin providers and secure Terraform state/locking;
-never commit state, credentials, or sensitive variable files. Terraform setup
-remains deferred until account/capability choices are verified. The Databricks
-bundle packages the first slice without provisioning platform storage credentials,
-external locations, catalogs, schemas, or trust roles.
+never commit state, credentials, or sensitive variable files. The
+[platform setup guide](../databricks/terraform/README.md) now defines credential
+bootstrap, exact IAM trust activation, workspace identity/catalog/schema/location
+setup, and a constrained job compute policy. Account/capability decisions and
+explicit authorization are still required before apply. The job bundle does not
+own these platform resources.
 
 ## Preflight Before Deployment
 
@@ -283,15 +285,16 @@ This checks templates locally; it does not validate cloud grants, connectivity,
 runtime support, or billing. Runtime contracts above still need implementation
 tests in their owning migration steps.
 
-The optional access stack is intentionally absent from the existing deployment
-and teardown scripts. An authorized deployment must explicitly select the S3
-stack then the hybrid access stack; review change sets before execution. Never
+The optional access and Databricks role stacks (`05`, `06`) are intentionally
+absent from the existing deployment and teardown scripts. An authorized deployment
+must explicitly follow the staged platform setup sequence; review change sets
+before execution. Never
 deploy the legacy IAM stack merely to obtain a hybrid identity: it generates
 long-lived credentials and exposes them in stack outputs.
 
 Do not use `make teardown` to pause the hybrid environment. The legacy script
 empties buckets, including versions, before deleting stacks, even when resource
-retention was intended. It neither handles the new access-stack dependency nor
+retention was intended. It neither handles the new access/role-stack dependencies nor
 stops remote compute. Deleting all project data/resources is an intentional
 end-of-use requirement, not a defect in the legacy workflow. Safe cross-platform
 pause/delete automation is deferred to operations;
@@ -300,8 +303,9 @@ until implemented, hybrid deployment requires an explicit reviewed procedure.
 When cloud services are introduced, stop schedules first, cancel active
 Databricks work, pause any enabled Snowflake pipes/tasks/refreshes, then suspend
 unused warehouse compute. Keep data unless destruction is explicitly requested.
-Before deleting the S3 stack, detach/delete consuming role resources and delete
-the optional access stack that imports its ARN. Suspending compute does not stop
+Before deleting the S3 stack, remove dependent UC locations/credentials, delete
+the optional role stack, then delete the optional access stack importing the
+bucket ARN. Suspending compute does not stop
 storage billing; resource removal is not the same as a recoverable rollback.
 
 The new `raw-landing-state` Docker volume contains source messages and is retained
@@ -316,8 +320,8 @@ outlive resource deletion.
 
 ## Next Slice
 
-Verify Databricks account/runtime/storage capabilities, prepare platform IaC with
-actual account identities, and authorize deployment of the implemented quote
+Verify Databricks account/runtime/storage capabilities, supply the prepared IaC
+with actual account identities, and authorize deployment of the implemented quote
 slice. Reconcile its outputs and failure/retry behavior in the workspace before
 implementing immutable gold exports and the Snowflake snapshot loader. The
 current silver path remains the default; do not migrate every job or add CDC at once.

@@ -26,7 +26,10 @@ exports -> Snowflake tables/marts -> local Streamlit. Local Airflow coordinates
 cloud processing; local live-data caching is planned separately.
 
 **Prepared, not deployed:** isolated hybrid S3 path outputs, HTTPS-only data lake
-access, and optional unattached IAM policies. No cloud jobs or Snowflake objects
+access, optional IAM policies, a deny-by-default Unity Catalog role, and staged
+Terraform roots for the Databricks credential and workspace objects. See
+[platform setup and full cleanup](databricks/terraform/README.md) for the required
+account inputs and reviewed bootstrap order. No cloud jobs or Snowflake objects
 have been deployed and no cloud schedules are enabled.
 
 **Implemented locally, disabled by default:** a separate raw Kafka consumer

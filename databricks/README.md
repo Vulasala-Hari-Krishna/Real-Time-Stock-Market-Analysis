@@ -115,10 +115,16 @@ Before any deployment or billable execution:
 6. Confirm budget, timeout, retry, and cleanup ownership. Free/trial credits are
    not a guarantee that this path is supported or cost-free.
 
-Terraform platform resources are still planned, not provisioned. CloudFormation
-owns AWS IAM/S3, Terraform will own platform catalog/schema/identity configuration,
-and this bundle owns the job plus its wheel artifact. The runtime owns the five
-table definitions; do not also declare those tables under a second IaC owner.
+Platform IaC is now prepared, not provisioned. Follow the
+[staged Terraform/IAM setup guide](terraform/README.md): bootstrap the credential
+against a disabled CloudFormation role, activate its exact generated trust, then
+create the isolated catalog/schemas, external locations, runtime principal, and
+job-only compute policy. Account/workspace capabilities and live permissions still
+require verification. Neither root creates compute or deploys this job.
+
+CloudFormation owns AWS IAM/S3, Terraform owns platform catalog/schema/identity
+configuration, and this bundle owns the job plus its wheel artifact. The runtime
+owns the five table definitions; do not also declare them under a second IaC owner.
 
 ## Build and Validate
 

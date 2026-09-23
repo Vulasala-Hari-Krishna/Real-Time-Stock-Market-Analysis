@@ -38,6 +38,10 @@ coverage.xml
 .terraform/
 *.tfvars
 *.tfvars.json
+*.tfplan
+*.tfplan.json
+crash.log
+crash.*.log
 
 # Data files
 .state/

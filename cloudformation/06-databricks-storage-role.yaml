@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Optional Unity Catalog storage role for the hybrid pipeline. Initially denies
+  all assumption; enable trust only after obtaining the credential's actual
+  Databricks principal and external ID. Creates no compute or access keys.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+    Description: Environment matching the hybrid access stack
+  ProjectName:
+    Type: String
+    Default: stock-market-pipeline
+    AllowedPattern: '^[a-z][a-z0-9-]{0,29}$'
+    Description: Project name matching the hybrid access stack
+  EnableUnityCatalogTrust:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Explicit second-stage activation after credential bootstrap
+  UnityCatalogPrincipalArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$'
+    Description: Exact Unity Catalog IAM role principal returned by Databricks
+  UnityCatalogExternalId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[A-Za-z0-9+=,.@:/_-]{2,1224}$'
+    Description: Exact external ID generated for this storage credential
+
+Rules:
+  RequireGeneratedTrustValues:
+    RuleCondition: !Equals [!Ref EnableUnityCatalogTrust, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref UnityCatalogPrincipalArn, '']]
+        AssertDescription: Trust activation requires the generated IAM principal
+      - Assert: !Not [!Equals [!Ref UnityCatalogExternalId, '']]
+        AssertDescription: Trust activation requires the credential external ID
+
+Conditions:
+  TrustEnabled: !Equals [!Ref EnableUnityCatalogTrust, 'true']
+
+Resources:
+  DatabricksStorageRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-uc-storage-${Environment}'
+      Description: Unity Catalog storage only; not a cluster instance profile
+      MaxSessionDuration: 3600
+      ManagedPolicyArns:
+        - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-DatabricksStoragePolicyArn'
+      AssumeRolePolicyDocument: !If
+        - TrustEnabled
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: UnityCatalogAssume
+              Effect: Allow
+              Principal:
+                AWS: !Ref UnityCatalogPrincipalArn
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  sts:ExternalId: !Ref UnityCatalogExternalId
+            - Sid: ExplicitSelfAssume
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+              Action: sts:AssumeRole
+              Condition:
+                ArnEquals:
+                  aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-uc-storage-${Environment}'
+                StringEquals:
+                  sts:ExternalId: !Ref UnityCatalogExternalId
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: BootstrapDenyAllAssumption
+              Effect: Deny
+              Principal: '*'
+              Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SelfAssumeOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-uc-storage-${Environment}'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  DatabricksStorageRoleArn:
+    Description: Role ARN for the bootstrap Terraform storage credential
+    Value: !GetAtt DatabricksStorageRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-DatabricksStorageRoleArn'
+  UnityCatalogTrustEnabled:
+    Description: Whether assumption by the specified UC credential is enabled
+    Value: !Ref EnableUnityCatalogTrust
