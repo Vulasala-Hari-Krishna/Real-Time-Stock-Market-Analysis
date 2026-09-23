@@ -1,0 +1,82 @@
+bundle:
+  name: stock-market-hybrid
+
+variables:
+  catalog:
+    description: Existing Unity Catalog catalog for this isolated slice
+  schema_prefix:
+    description: Existing schema prefix with _bronze, _silver, and _gold schemas
+    default: stocks
+  bucket:
+    description: Existing S3 bucket with governed landing/lakehouse/checkpoint access
+  spark_version:
+    description: Verified Unity Catalog-compatible runtime with Python 3.11 or newer
+  node_type_id:
+    description: Approved smallest suitable AWS instance type in the workspace region
+  cluster_policy_id:
+    description: Approved compute policy permitting the single-node job configuration
+  run_as_service_principal:
+    description: Application ID of the least-privilege workspace service principal
+
+run_as:
+  service_principal_name: ${var.run_as_service_principal}
+
+artifacts:
+  hybrid_wheel:
+    type: whl
+    path: .
+    build: python -m pip wheel --no-deps --wheel-dir dist .
+
+resources:
+  jobs:
+    landed_ticks:
+      name: stock-market-hybrid-${bundle.target}-landed-ticks
+      description: Manual AvailableNow ingestion and bounded sampled-quote snapshots
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+      queue:
+        enabled: false
+      job_clusters:
+        - job_cluster_key: ticks_compute
+          new_cluster:
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
+            policy_id: ${var.cluster_policy_id}
+            apply_policy_default_values: true
+            data_security_mode: SINGLE_USER
+            single_user_name: ${var.run_as_service_principal}
+            num_workers: 0
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: local[*]
+              spark.sql.session.timeZone: UTC
+              spark.sql.shuffle.partitions: "4"
+            custom_tags:
+              ResourceClass: SingleNode
+              Project: stock-market-hybrid
+              Environment: ${bundle.target}
+      tasks:
+        - task_key: ingest_and_rebuild_quotes
+          job_cluster_key: ticks_compute
+          timeout_seconds: 1800
+          max_retries: 0
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: stock_market_hybrid
+            entry_point: landed_ticks
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema-prefix
+              - ${var.schema_prefix}
+              - --bucket
+              - ${var.bucket}
+          libraries:
+            - whl: ./dist/*.whl
+
+targets:
+  dev:
+    default: true
+    mode: production
+    workspace:
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}

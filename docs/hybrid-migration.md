@@ -7,7 +7,9 @@ This is the target contract for incremental work on
 The [README](../README.md) documents the existing local workflow. This first step
 prepared storage/access templates and the contracts below. The next local slice
 now implements an opt-in raw consumer and tests without replacing the legacy
-silver path. No resources, credentials, or cloud schedules have been deployed.
+silver path. A [manual Databricks slice](../databricks/README.md) is also implemented
+for bronze envelopes, silver validated quote samples/quarantine, and gold sampled
+daily summaries. No resources, credentials, or cloud schedules have been deployed.
 
 ```text
 Local API producer -> local Kafka -> local raw consumer -> S3 landing
@@ -174,8 +176,10 @@ access using SDK stubs. Live Kafka-to-S3 delivery and IAM are not yet verified.
 
 ## Gold Snapshot Contract v1
 
-Start with complete snapshots of selected small datasets, initially
-`daily_summaries` with key `(symbol, date)`. Pin Delta source versions before
+Start with complete snapshots of selected small datasets. The first Databricks
+slice produces `daily_quote_summary` with key `(provider, symbol, capture_date_utc)`;
+the legacy `daily_summaries` indicator product is not migrated yet. Finalize the
+first export's dataset schema before implementing publication. Pin Delta source versions before
 export, establish an upstream batch boundary, and read using Delta APIs. No
 loader may scan the physical files beneath a Delta table as ordinary Parquet.
 
@@ -235,14 +239,16 @@ the legacy bucket-wide user and assume that removes its existing broad grants.
 |--------------------|--------------------------------|
 | AWS S3, IAM policies, future platform trust roles | CloudFormation; S3/access-policy templates prepared |
 | Databricks platform objects and permissions | Terraform planned after account/capability checks |
-| Databricks jobs and code deployments | Versioned deployment bundles planned |
+| Databricks jobs and code deployments | Manual quote-slice bundle and wheel implemented, not deployed |
 | Snowflake warehouse, integrations, roles and database/schema containers | Terraform planned |
 | Snowflake tables, views, marts, schema evolution | Versioned SQL migrations planned |
 
 Give every object and grant one owner; do not manage the same resource through
 Terraform and bundles/SQL. Pin providers and secure Terraform state/locking;
-never commit state, credentials, or sensitive variable files. No Terraform or
-platform deployment scaffold is added until its vertical slice requires it.
+never commit state, credentials, or sensitive variable files. Terraform setup
+remains deferred until account/capability choices are verified. The Databricks
+bundle packages the first slice without provisioning platform storage credentials,
+external locations, catalogs, schemas, or trust roles.
 
 ## Preflight Before Deployment
 
@@ -310,8 +316,8 @@ outlive resource deletion.
 
 ## Next Slice
 
-Implement a single Databricks ingestion/transformation job consuming the raw
-envelope, after verifying account/runtime/storage capabilities and authorizing
-any required resource deployment. Reconcile outputs before adding Snowflake.
-Keep the current silver path as the default until the replacement is verified;
-do not migrate every job or add CDC at once.
+Verify Databricks account/runtime/storage capabilities, prepare platform IaC with
+actual account identities, and authorize deployment of the implemented quote
+slice. Reconcile its outputs and failure/retry behavior in the workspace before
+implementing immutable gold exports and the Snowflake snapshot loader. The
+current silver path remains the default; do not migrate every job or add CDC at once.

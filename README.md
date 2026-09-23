@@ -26,14 +26,23 @@ exports -> Snowflake tables/marts -> local Streamlit. Local Airflow coordinates
 cloud processing; local live-data caching is planned separately.
 
 **Prepared, not deployed:** isolated hybrid S3 path outputs, HTTPS-only data lake
-access, and optional unattached IAM policies. No Databricks jobs, Snowflake
-objects, or cloud schedules exist yet.
+access, and optional unattached IAM policies. No cloud jobs or Snowflake objects
+have been deployed and no cloud schedules are enabled.
 
 **Implemented locally, disabled by default:** a separate raw Kafka consumer
 preserves original bytes/metadata in gzip NDJSON under `landing/ticks/`, with a
 durable SQLite spool and commits after successful uploads. The existing Spark
 silver consumer is unchanged. See [raw consumer operation](docs/hybrid-migration.md#running-the-raw-consumer)
 for the opt-in `hybrid-raw` Docker profile, prerequisites, and recovery limits.
+
+**Databricks slice implemented, not deployed:** a manual wheel-task bundle reads
+landed envelopes with Auto Loader `AvailableNow`, writes raw bronze Delta,
+validates/quarantines/deduplicates quote samples into silver, and builds gold
+daily sampled-quote summaries. It does not treat sampled quotes as exchange OHLCV
+or sum cumulative provider volumes. See [the Databricks guide](databricks/README.md)
+for account prerequisites, retry/version semantics, validation, and cleanup.
+Historical indicators, Snowflake publication, and Airflow coordination are later
+slices, not implemented integrations.
 
 See [the foundation plan and data contracts](docs/hybrid-migration.md) for
 storage paths, account prerequisites, IaC ownership, verification, and next steps.

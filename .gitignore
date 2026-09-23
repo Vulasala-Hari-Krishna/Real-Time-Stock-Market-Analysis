@@ -32,6 +32,12 @@ coverage.xml
 
 # Environment
 .env
+.databricks/
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+*.tfvars.json
 
 # Data files
 .state/
