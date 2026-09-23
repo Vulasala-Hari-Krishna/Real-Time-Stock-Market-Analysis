@@ -14,6 +14,36 @@ and surfaces interactive dashboards — **live** and **historical** — via
 
 ---
 
+## Hybrid Migration Status
+
+The hybrid migration is being built incrementally on
+`feature/databricks_snowflake_impl`. The architecture and operating instructions
+below this section still describe the existing local implementation.
+
+**Target:** local producer -> local Kafka -> local raw consumer -> S3 landing ->
+on-demand Databricks bronze/silver/gold Delta tables -> completed S3 snapshot
+exports -> Snowflake tables/marts -> local Streamlit. Local Airflow coordinates
+cloud processing; local live-data caching is planned separately.
+
+**Prepared, not deployed:** isolated hybrid S3 path outputs, HTTPS-only data lake
+access, and optional unattached IAM policies. No Databricks jobs, Snowflake
+objects, or cloud schedules exist yet.
+
+**Implemented locally, disabled by default:** a separate raw Kafka consumer
+preserves original bytes/metadata in gzip NDJSON under `landing/ticks/`, with a
+durable SQLite spool and commits after successful uploads. The existing Spark
+silver consumer is unchanged. See [raw consumer operation](docs/hybrid-migration.md#running-the-raw-consumer)
+for the opt-in `hybrid-raw` Docker profile, prerequisites, and recovery limits.
+
+See [the foundation plan and data contracts](docs/hybrid-migration.md) for
+storage paths, account prerequisites, IaC ownership, verification, and next steps.
+Full data/resource deletion is intentional at the end of a personal-project
+session. The legacy deploy/teardown scripts need hybrid updates before use: they
+print credential outputs or omit the new optional access stack/cloud compute.
+Do not confuse destructive teardown with pausing. Free-tier eligibility is not a cost cap.
+
+---
+
 ## Architecture (Lambda Architecture)
 
 ![Architecture Diagram](docs/architecture.drawio.svg)

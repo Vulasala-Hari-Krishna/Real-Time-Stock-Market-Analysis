@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   S3 data lake buckets for the stock market analytics pipeline.
-  Creates a data lake bucket (bronze/silver/gold prefixes) and an
-  Athena query results bucket. Includes lifecycle rules and blocks
-  all public access.
+  Preserves legacy bronze/silver/gold paths and defines separate hybrid
+  landing, lakehouse, checkpoint, and publishing paths. Includes an
+  Athena query results bucket for the existing local workflow.
 
 Parameters:
   Environment:
@@ -45,17 +45,39 @@ Resources:
             Prefix: bronze/
             Status: Enabled
             ExpirationInDays: 30
-          - Id: GoldTransitionToIA
-            Prefix: gold/
+          - Id: AbortIncompleteLandingUploads
+            Prefix: landing/
             Status: Enabled
-            Transitions:
-              - StorageClass: STANDARD_IA
-                TransitionInDays: 90
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: AbortIncompletePublishUploads
+            Prefix: publish/
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
       Tags:
         - Key: Project
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
+
+  DataLakeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataLakeBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt DataLakeBucket.Arn
+              - !Sub '${DataLakeBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
 
   AthenaResultsBucket:
     Type: AWS::S3::Bucket
@@ -94,6 +116,26 @@ Outputs:
     Value: !GetAtt DataLakeBucket.Arn
     Export:
       Name: !Sub '${ProjectName}-${Environment}-DataLakeBucketArn'
+  HybridLandingUri:
+    Description: Raw source files, separate from legacy bronze and Delta tables
+    Value: !Sub 's3://${DataLakeBucket}/landing/'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-HybridLandingUri'
+  HybridLakehouseUri:
+    Description: Unity Catalog external Delta table storage; no lifecycle expiry
+    Value: !Sub 's3://${DataLakeBucket}/lakehouse/'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-HybridLakehouseUri'
+  HybridCheckpointUri:
+    Description: Hybrid checkpoints and schema state; no lifecycle expiry
+    Value: !Sub 's3://${DataLakeBucket}/checkpoints/hybrid/'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-HybridCheckpointUri'
+  HybridPublishUri:
+    Description: Immutable snapshots and completed manifests for Snowflake
+    Value: !Sub 's3://${DataLakeBucket}/publish/'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-HybridPublishUri'
   AthenaResultsBucketName:
     Description: Name of the Athena query results bucket
     Value: !Ref AthenaResultsBucket
