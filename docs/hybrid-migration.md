@@ -1,4 +1,9 @@
-# Hybrid Migration Foundation
+# Hybrid Architecture and Data Contracts
+
+For current implementation status, recorded validation, remaining tasks, and
+cross-assistant continuity, start with the
+[handover and progress ledger](implementation-handover.md). This document owns
+the target architecture and data contracts; platform guides own detailed runbooks.
 
 ## Status and Scope
 
@@ -167,7 +172,8 @@ indicates process liveness only, not successful delivery or market freshness.
   Loss of both local state and Kafka retention cannot be repaired by this consumer.
 - Source bytes, null tombstones, duplicate headers, and Kafka timestamps are
   preserved. Malformed market data is not dropped; canonical parsing and
-  quarantine will be implemented in Databricks.
+  quarantine are implemented in the Databricks quote slice, but not yet verified
+  in a deployed workspace.
 
 The unit suite uses real SQLite/gzip with mocked Kafka/S3, covering interrupted
 uploads, commit failure, restart/rebalance replay, size limits, and unchanged
@@ -247,8 +253,8 @@ Give every object and grant one owner; do not manage the same resource through
 Terraform and bundles/SQL. Pin providers and secure Terraform state/locking;
 never commit state, credentials, or sensitive variable files. The
 [platform setup guide](../databricks/terraform/README.md) now defines credential
-bootstrap, exact IAM trust activation, workspace identity/catalog/schema/location
-setup, and a constrained job compute policy. Account/capability decisions and
+bootstrap, exact IAM trust activation, and workspace identity/catalog/schema/
+location setup for serverless-only execution. Account/capability decisions and
 explicit authorization are still required before apply. The job bundle does not
 own these platform resources.
 
@@ -258,8 +264,12 @@ own these platform resources.
   change-set permissions. Review lifecycle/bucket policies and any externally
   managed policy before applying the S3 update; protect current data and exports.
 - Confirm Databricks workspace access, Unity Catalog support, permitted external
-  S3 storage, service authentication, selected runtime, and supported terminating
-  compute. Free Edition/trials may not support the required integration.
+  S3 storage, and service authentication. Verified on Free Edition (2026-09-24):
+  a Unity Catalog storage credential + external location against a self-owned
+  S3 bucket passed a full Test Connection, and a serverless notebook wrote/read
+  a real Delta table through it. Free Edition has no classic compute; this
+  pipeline runs on serverless compute instead, with no runtime/node-type choice
+  to make.
 - Confirm Snowflake account/cloud/region, storage integration and role-creation
   privileges, service authentication, and X-Small warehouse pricing. Prefer a
   compatible AWS region to reduce unnecessary transfer and setup complexity.

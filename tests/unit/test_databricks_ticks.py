@@ -293,15 +293,16 @@ def test_bundle_is_manual_bounded_and_uses_explicit_platform_inputs() -> None:
     assert task["max_retries"] == 0
     assert task["retry_on_timeout"] is False
     assert task["python_wheel_task"]["entry_point"] == "landed_ticks"
-    cluster = deployed["job_clusters"][0]["new_cluster"]
-    assert cluster["num_workers"] == 0
-    assert cluster["data_security_mode"] == "SINGLE_USER"
+    # Serverless compute: no job_clusters/new_cluster block. Dependencies are
+    # declared via a job-level environment instead of a classic-cluster policy.
+    assert "job_clusters" not in deployed
+    environment_key = task["environment_key"]
+    environments = {env["environment_key"]: env for env in deployed["environments"]}
+    assert environment_key in environments
+    assert environments[environment_key]["spec"]["dependencies"]
     for name in (
         "catalog",
         "bucket",
-        "spark_version",
-        "node_type_id",
-        "cluster_policy_id",
         "run_as_service_principal",
     ):
         assert "default" not in bundle["variables"][name]

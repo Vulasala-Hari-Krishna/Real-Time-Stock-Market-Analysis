@@ -2,10 +2,22 @@
 
 ## Status
 
-Implemented code and a manual deployment bundle; **not deployed or cloud-tested**.
-Local Kafka/raw capture and the legacy silver consumer are unchanged. This slice
-requires a workspace with Unity Catalog, external S3 access, and supported classic
-job compute. It is not a claim of Free Edition compatibility.
+Implemented code and a manual deployment bundle; **not yet run end-to-end in a
+workspace**. Local Kafka/raw capture and the legacy silver consumer are unchanged.
+This slice requires a workspace with Unity Catalog and external S3 access; it
+runs on **serverless compute**, not a classic job cluster.
+
+Databricks Free Edition has been verified capable of the storage half of this
+slice: a Unity Catalog storage credential and external location were created
+manually in the workspace UI against a personally owned S3 bucket, "Test
+Connection" passed all checks (Read/List/Write/Delete/Path Exists/Assume Role/
+Self-Assume Role/External ID Condition), and a serverless notebook successfully
+wrote and read back a real Delta table through that external location. Free
+Edition has **no classic compute at all**, which is why this bundle targets
+serverless; it also has no account console/account-level API access, which
+affects only the account-level Service Principal User step below, not the
+storage or compute path. The full Auto Loader job (this bundle, deployed and
+run) has not yet been exercised against a real workspace.
 
 ```text
 landing/ticks/**/*.json.gz
@@ -101,11 +113,11 @@ Before any deployment or billable execution:
    `USE SCHEMA`, appropriate `CREATE TABLE` and table read/write permissions,
    and external-location file/external-table grants needed by this job. Do not
    grant routine jobs administrator privileges or overlapping managed locations.
-4. Choose a verified runtime (for example an approved Spark 3.5/Python 3.11 LTS),
-   AWS node type, and compute policy allowing a single-node dedicated job cluster.
-   Policy/workspace availability differs; the bundle does not guess instance IDs.
-   Verify deployment identity permissions to use the runtime service principal
-   and compute policy. Review job-cluster networking for unintended AWS charges.
+4. This job runs on serverless compute; there is no runtime/node-type/compute-
+   policy selection to make. Confirm serverless jobs are enabled for the
+   workspace and that Free Edition's job/task concurrency quota (5 concurrent
+   tasks per account, at last check) is sufficient. Verify deployment identity
+   permissions to use the runtime service principal.
 5. Use a unique dev catalog/schema prefix and restrict permissions on the bundle's
    shared workspace deployment root. Deploying the same target twice is not an
    isolated environment. Do not start a job with no newly landed files or pending
@@ -118,9 +130,10 @@ Before any deployment or billable execution:
 Platform IaC is now prepared, not provisioned. Follow the
 [staged Terraform/IAM setup guide](terraform/README.md): bootstrap the credential
 against a disabled CloudFormation role, activate its exact generated trust, then
-create the isolated catalog/schemas, external locations, runtime principal, and
-job-only compute policy. Account/workspace capabilities and live permissions still
-require verification. Neither root creates compute or deploys this job.
+create the isolated catalog/schemas, external locations, and runtime principal.
+There is no compute policy to create; the job runs on serverless compute.
+Account/workspace capabilities and live permissions still require verification.
+Neither root creates compute or deploys this job.
 
 CloudFormation owns AWS IAM/S3, Terraform owns platform catalog/schema/identity
 configuration, and this bundle owns the job plus its wheel artifact. The runtime

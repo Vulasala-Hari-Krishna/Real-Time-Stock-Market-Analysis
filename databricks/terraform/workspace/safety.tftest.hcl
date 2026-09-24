@@ -6,10 +6,6 @@ variables {
   schema_prefix              = "stocks"
   bucket                     = "offline-test-bucket"
   credential_name            = "stocks_dev_storage"
-  spark_version              = "15.4.x-scala2.12"
-  node_type_id               = "i3.xlarge"
-  max_dbus_per_hour          = 2
-  deployment_group           = "portfolio-deployers"
   trust_activation_confirmed = true
 }
 
@@ -88,30 +84,9 @@ run "platform_boundaries" {
   }
   assert {
     condition = (
-      jsondecode(databricks_cluster_policy.ticks.definition)["cluster_type"].value == "job" &&
-      jsondecode(databricks_cluster_policy.ticks.definition)["num_workers"].value == 0 &&
-      jsondecode(databricks_cluster_policy.ticks.definition)["node_type_id"].value == var.node_type_id &&
-      jsondecode(databricks_cluster_policy.ticks.definition)["spark_version"].value == var.spark_version &&
-      jsondecode(databricks_cluster_policy.ticks.definition)["dbus_per_hour"].maxValue == var.max_dbus_per_hour &&
-      jsondecode(databricks_cluster_policy.ticks.definition)["aws_attributes.instance_profile_arn"].type == "forbidden" &&
-      databricks_cluster_policy.ticks.max_clusters_per_user == 1
-    )
-    error_message = "Job-only, single-node policy must fix approved compute and exclude instance-profile access."
-  }
-  assert {
-    condition = (
       output.bundle_variables.run_as_service_principal == databricks_service_principal.runtime.application_id &&
-      output.bundle_variables.cluster_policy_id == databricks_cluster_policy.ticks.id &&
       output.bundle_variables.catalog == var.catalog
     )
     error_message = "Bundle inputs must refer to resources managed by this root."
   }
-}
-
-run "reject_broad_deployment_group" {
-  command = plan
-  variables {
-    deployment_group = "users"
-  }
-  expect_failures = [var.deployment_group]
 }

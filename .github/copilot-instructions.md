@@ -3,6 +3,7 @@
 ## Status and Scope
 
 - This is an existing personal portfolio project, not a new scaffold. Implement the hybrid migration incrementally on `feature/databricks_snowflake_impl`; do not switch branches or commit unless requested.
+- At the start of each migration session, read [the implementation handover](../docs/implementation-handover.md), then verify Git state and current files. It is the model-independent progress ledger; do not rely on previous chat or assistant memory as the only handover.
 - The architecture below is the agreed target, not a claim that its integrations already exist. Inspect the touched code and tests before each step. Keep the existing local workflow operational until its replacement is implemented and verified.
 - The current baseline is documented in [README.md](../README.md): local Kafka and Spark streaming write silver Parquet to S3; local Spark batch jobs write gold Delta tables; local Airflow submits jobs; Streamlit reads S3. Databricks notebooks are exploratory, not deployed pipelines.
 - Do not interpret the old local-only/free-services design as a prohibition on Databricks or Snowflake. Equally, do not provision paid resources or activate recurring cloud workloads without explicit authorization.
@@ -49,6 +50,7 @@ Local Airflow -> Databricks job API -> publication validation -> Snowflake SQL
 - Prefer compatible AWS regions. Check workspace edition, runtime, connectivity, IAM, and prices before provisioning. Free Edition/trial availability is not a guarantee that the full architecture is supported or permanently free.
 - Avoid MSK, MWAA, EMR, always-on EC2, and unnecessary networking services. Glue/Athena are optional legacy paths, not requirements of the new serving layer.
 - Preserve producer controls (`RUN_PIPELINE`, `MAX_ITERATIONS`). Local Docker shutdown and AWS CloudFormation teardown do not stop Databricks jobs or Snowflake resources; cloud pause/cancel/suspend procedures must be implemented explicitly.
+- Full destruction of project resources and data after use is an explicit personal-project requirement, separate from pause. Add cleanup coverage as each resource is introduced, with explicit destructive confirmation, dependency ordering, and residual-resource checks. This requirement is not authorization to delete anything unprompted.
 - No credentials in code, bundles, SQL, logs, or manifests. Use least-privilege IAM/Unity Catalog storage credentials, Snowflake storage integrations, supported service authentication, and local/CI secret stores. Do not use administrator identities for routine jobs.
 - Do not expire active Delta files or checkpoints using S3 lifecycle rules. Separate raw/export retention from table-aware maintenance; account for noncurrent object versions and recovery needs. Existing S3 policies must be reviewed before reusing prefixes.
 
@@ -62,10 +64,17 @@ Local Airflow -> Databricks job API -> publication validation -> Snowflake SQL
 
 Complete only the requested step. Do not deploy resources, rewrite all jobs, or enable later phases as incidental follow-up work.
 
+## Handover Maintenance
+
+- Before ending every implementation session, update [the handover ledger](../docs/implementation-handover.md): date, workstream status, changed files/revision, checks actually run and results, blockers, and the next concrete task with acceptance criteria.
+- Track implementation, local/static validation, deployment, and live verification separately. Retain dated prior evidence; do not claim it was rerun or invent measured results, CI runs, commits, or cloud resource state.
+- Update the owning architecture/contract or operational guide when behavior changes and link it from the ledger. Record decisions, failed checks, and deferred work in repository documentation, not just chat.
+- Never put secrets, full Terraform state, or sensitive outputs in the handover. Cloud deployment/run and destructive cleanup still require explicit authorization. Keep the continuation prompt and remaining roadmap usable by any assistant.
+
 ## Repository Conventions and Checks
 
-- Reuse `src/`, `dags/`, `dashboards/`, tests, and existing utilities. Keep reusable transformations in Python modules. Planned `databricks/` deployment assets and `snowflake/` SQL assets should be added only when their implementation step needs them.
-- AWS infrastructure remains CloudFormation-managed. Use versioned Databricks deployment bundles and versioned Snowflake SQL for their respective platform objects; do not require CloudFormation to manage all three platforms.
+- Reuse `src/`, `dags/`, `dashboards/`, tests, existing utilities, and the implemented `databricks/` assets. Keep reusable transformations in Python modules. Add planned `snowflake/` assets only when their implementation step needs them.
+- AWS infrastructure remains CloudFormation-managed. Terraform owns Databricks platform objects and later Snowflake platform setup; versioned bundles own Databricks jobs/code, and versioned SQL owns Snowflake models/migrations. Runtime Delta tables have one owner, not duplicate Terraform ownership. Do not require CloudFormation to manage all three platforms.
 - Follow the applicable [scoped instructions](instructions/): Python, Spark, Airflow, Docker, CloudFormation, tests, Databricks, and Snowflake. Language and domain instructions apply together; keep them consistent.
 - Preserve Python 3.11-compatible local code, type hints, Google-style public docstrings, Black (88), Ruff, mypy, Pydantic settings, structured logging, and environment-based configuration. Check managed-runtime compatibility separately.
 - Test behavior changes first where practical. Keep default tests hermetic and cloud-free; use mocks for external services and opt-in integration tests for deployed platforms. Preserve the existing >=80% unit coverage gate.

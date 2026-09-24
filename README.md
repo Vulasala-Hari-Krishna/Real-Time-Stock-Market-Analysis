@@ -16,6 +16,12 @@ and surfaces interactive dashboards — **live** and **historical** — via
 
 ## Hybrid Migration Status
 
+**Continuing this project with another assistant?** Start with the
+[implementation handover and progress ledger](docs/implementation-handover.md).
+It records the agreed architecture, implemented versus unverified work, remaining
+roadmap, latest recorded checks, blockers, and a continuation prompt. Update it
+after each implementation session; do not rely on chat history alone.
+
 The hybrid migration is being built incrementally on
 `feature/databricks_snowflake_impl`. The architecture and operating instructions
 below this section still describe the existing local implementation.

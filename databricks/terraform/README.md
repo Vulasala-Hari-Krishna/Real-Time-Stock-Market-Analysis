@@ -14,7 +14,7 @@ administration are explicit prerequisites, not silently provisioned services.
 | [Access CloudFormation](../../cloudformation/05-hybrid-access.yaml) | Unattached local, Databricks, and Snowflake S3 policies |
 | [Role CloudFormation](../../cloudformation/06-databricks-storage-role.yaml) | Unity Catalog IAM role, S3 policy attachment and exact trust |
 | [Credential Terraform root](credential/main.tf) | One workspace-isolated storage credential and generated trust outputs |
-| [Workspace Terraform root](workspace/main.tf) | Runtime service principal, external locations, catalog/schemas, grants, compute policy |
+| [Workspace Terraform root](workspace/main.tf) | Runtime service principal, external locations, catalog/schemas, grants (serverless compute; no cluster policy) |
 | [Deployment bundle](../databricks.yml) | Manual job and packaged application code, not platform objects |
 | Job runtime | Five Delta table definitions and data; not owned by Terraform |
 
@@ -28,23 +28,28 @@ and safety tests, not implicitly during deployment.
 
 ## Required Decisions
 
-- Confirm AWS account/region, existing S3 stack names, and compatible Databricks
-  workspace/edition/runtime. Free Edition may not support these external-storage
-  and classic-compute features. Do not create paid workspaces as an incidental fix.
-- Select a unique dev catalog, schema prefix, credential name, supported runtime,
-  affordable node type, and per-cluster DBU/hour bound. The bound excludes AWS VM,
-  storage, networking, and other Databricks/serverless spending.
+- Confirm AWS account/region and existing S3 stack names. **Verified on Free
+  Edition** (2026-09-24): a Unity Catalog storage credential + external location
+  against a self-owned S3 bucket passed a full Test Connection (Read/List/Write/
+  Delete/Path Exists/Assume Role/Self-Assume Role/External ID Condition), and a
+  serverless notebook wrote and read back a real Delta table through it. Free
+  Edition has no classic compute at all, so this root creates no cluster policy
+  and the job runs on serverless compute instead; cost/scope control comes from
+  the platform's serverless job/task quotas, not a per-cluster DBU/hour bound.
+- Select a unique dev catalog and schema prefix, matching the bundle input.
 - Use separate platform-setup and job-runtime identities. The setup identity needs
   sufficient workspace/Unity Catalog administration privileges to create credentials,
   locations/catalogs/schemas, a service principal, policy, and grants. Routine jobs
   use only the newly created non-admin runtime service principal.
-- Identify an existing account-level deployment group assigned to the workspace.
-  It receives `CAN_USE` only on this policy, not data or administrative grants.
-  An authorized account administrator must separately grant this group the Service
-  Principal User role for the generated runtime principal so deployment can set
-  `run_as`. This account-level assignment is not managed by these workspace roots.
+- On a workspace with account-console access, an authorized account administrator
+  must separately grant the deploying identity the Service Principal User role for
+  the generated runtime principal so deployment can set `run_as`. Free Edition has
+  **no account console/account-level API access at all**, so this step does not
+  apply there; a Free Edition admin deploys the bundle as themselves (workspace
+  PAT/OAuth), with the job still executing as the least-privilege runtime
+  principal via `run_as`. Re-check this if the workspace is later upgraded.
 - Review inherited group entitlements: explicit false flags do not negate inherited
-  cluster-create/admin access. Verify the runtime principal cannot bypass the policy.
+  cluster-create/admin access. Verify the runtime principal cannot bypass its grants.
 - Establish state storage/locking and an explicit spending/deployment window.
   No authorization to execute applies or billable jobs is inferred from these files.
 
@@ -96,10 +101,10 @@ and same Databricks workspace throughout; the current bundle/policy is dev-only.
    explicitly validate the credential in Databricks. A successful Terraform update
    alone is not proof that STS/S3 works; IAM propagation and platform validation
    behavior must be checked. Never leave validation bypassed as a workaround.
-5. In `workspace/`, supply the variables declared in [main.tf](workspace/main.tf),
-   including the credential name, bucket, catalog/prefix, runtime/node type,
-   DBU/hour bound, deployment group, and `trust_activation_confirmed=true`.
-   Plan/review/apply. This is a human confirmation gate, not an AWS trust probe.
+5. In `workspace/`, supply the variables declared in [main.tf](workspace/main.tf):
+   workspace host, catalog, schema prefix, bucket, credential name, and
+   `trust_activation_confirmed=true`. Plan/review/apply. This is a human
+   confirmation gate, not an AWS trust probe.
    External-location validation is enabled and fallback/file-event services are
    disabled; access failures stop the apply rather than weakening grants.
 6. Inspect the created objects and grants. The runtime has read-only file access
@@ -142,12 +147,10 @@ deletion does not cascade (`force_destroy=false`); the user must confirm and rem
 dependent tables first. This supports explicit full destruction, not an indefinite
 retention rule or automatic data deletion on ordinary updates.
 
-The compute policy fixes job-only, single-node, dedicated runtime identity,
-runtime version, driver/worker node type and on-demand AWS availability; pools,
-autoscaling, and instance-profile access are forbidden. It allows at most one
-cluster per user under the policy. These restrictions are not an account-wide
-spend cap. The bundle still owns the 30-minute timeout, no retries/queue, and no
-schedule. Creating the policy itself does not start compute.
+There is no cluster policy: the job runs on serverless compute, governed by the
+platform's own serverless job/task quotas rather than a per-cluster DBU/hour
+bound or instance-profile restriction. The bundle still owns the 30-minute
+timeout, no retries/queue, and no schedule.
 
 ## Offline Validation
 

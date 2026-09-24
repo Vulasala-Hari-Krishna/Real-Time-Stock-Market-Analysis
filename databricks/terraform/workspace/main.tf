@@ -60,42 +60,6 @@ variable "trust_activation_confirmed" {
   description = "Set true only after updating CloudFormation trust and validating the credential."
 }
 
-variable "spark_version" {
-  type        = string
-  description = "Verified UC-compatible Spark 3.5/Python 3.11+ runtime ID; also pass to the bundle."
-  validation {
-    condition     = can(regex("^[0-9]+\\.[0-9]+[A-Za-z0-9._-]+$", var.spark_version))
-    error_message = "Provide an explicit runtime ID, not an automatic/latest selector."
-  }
-}
-
-variable "node_type_id" {
-  type        = string
-  description = "Approved region-specific AWS node type; also pass to the bundle."
-  validation {
-    condition     = can(regex("^[A-Za-z0-9.-]+$", var.node_type_id))
-    error_message = "Provide the exact approved node type ID."
-  }
-}
-
-variable "max_dbus_per_hour" {
-  type        = number
-  description = "Per-cluster DBU/hour policy bound, not an AWS or account-wide spending cap."
-  validation {
-    condition     = var.max_dbus_per_hour > 0 && var.max_dbus_per_hour <= 10
-    error_message = "Choose a positive DBU/hour bound no greater than 10 for this personal slice."
-  }
-}
-
-variable "deployment_group" {
-  type        = string
-  description = "Existing account-level group allowed to deploy/use this job policy; not admins or users."
-  validation {
-    condition     = length(trimspace(var.deployment_group)) > 0 && !contains(["admins", "users"], lower(var.deployment_group))
-    error_message = "Use a dedicated deployment group, not a workspace-wide group."
-  }
-}
-
 provider "databricks" {
   host = var.workspace_host
 }
@@ -208,45 +172,10 @@ resource "databricks_grant" "locations_runtime" {
   privileges        = each.value.privileges
 }
 
-resource "databricks_cluster_policy" "ticks" {
-  name                  = "${local.name}_manual_ticks"
-  description           = "Single-node, job-only quote processing; no compute is created by this resource."
-  max_clusters_per_user = 1
-  definition = jsonencode({
-    "cluster_type"                                = { type = "fixed", value = "job" }
-    "spark_version"                               = { type = "fixed", value = var.spark_version }
-    "node_type_id"                                = { type = "fixed", value = var.node_type_id }
-    "driver_node_type_id"                         = { type = "fixed", value = var.node_type_id }
-    "num_workers"                                 = { type = "fixed", value = 0 }
-    "data_security_mode"                          = { type = "fixed", value = "SINGLE_USER" }
-    "single_user_name"                            = { type = "fixed", value = databricks_service_principal.runtime.application_id }
-    "spark_conf.spark.databricks.cluster.profile" = { type = "fixed", value = "singleNode" }
-    "spark_conf.spark.master"                     = { type = "fixed", value = "local[*]" }
-    "custom_tags.ResourceClass"                   = { type = "fixed", value = "SingleNode" }
-    "custom_tags.Project"                         = { type = "fixed", value = "stock-market-hybrid" }
-    "custom_tags.Environment"                     = { type = "fixed", value = "dev" }
-    "dbus_per_hour"                               = { type = "range", maxValue = var.max_dbus_per_hour }
-    "aws_attributes.availability"                 = { type = "fixed", value = "ON_DEMAND" }
-    "aws_attributes.instance_profile_arn"         = { type = "forbidden" }
-    "instance_pool_id"                            = { type = "forbidden" }
-    "driver_instance_pool_id"                     = { type = "forbidden" }
-    "autoscale.min_workers"                       = { type = "forbidden" }
-    "autoscale.max_workers"                       = { type = "forbidden" }
-  })
-}
-
-resource "databricks_permissions" "policy_use" {
-  cluster_policy_id = databricks_cluster_policy.ticks.id
-
-  access_control {
-    service_principal_name = databricks_service_principal.runtime.application_id
-    permission_level       = "CAN_USE"
-  }
-  access_control {
-    group_name       = var.deployment_group
-    permission_level = "CAN_USE"
-  }
-}
+# No cluster policy: this workspace runs on serverless compute only (Free Edition
+# and serverless-first workspaces have no classic/job clusters to attach a
+# compute policy to). Cost/scope control comes from the platform's own serverless
+# job/task quotas instead of a per-cluster DBU/hour bound.
 
 output "bundle_variables" {
   description = "Non-secret BUNDLE_VAR inputs; not proof of live job validation."
@@ -254,9 +183,6 @@ output "bundle_variables" {
     catalog                  = databricks_catalog.ticks.name
     schema_prefix            = var.schema_prefix
     bucket                   = var.bucket
-    spark_version            = var.spark_version
-    node_type_id             = var.node_type_id
-    cluster_policy_id        = databricks_cluster_policy.ticks.id
     run_as_service_principal = databricks_service_principal.runtime.application_id
   }
 }
