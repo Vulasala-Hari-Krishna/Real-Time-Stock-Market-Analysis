@@ -2,18 +2,18 @@ mock_provider "snowflake" {}
 
 variables {
   bucket                     = "offline-test-bucket"
-  storage_role_arn           = "arn:aws:iam::123456789012:role/stock-market-pipeline-snowflake-storage-dev"
   database_name              = "PORTFOLIO_DEV"
   schema_name                = "PUBLISH_STAGING"
   warehouse_name              = "PORTFOLIO_DEV_WH"
   loader_role_name           = "PORTFOLIO_DEV_LOADER"
   credit_quota               = 10
-  organization_name         = "ILMRWBU"
+  integration_name           = "PORTFOLIO_DEV_PUBLISH_INTEGRATION"
+  organization_name          = "ILMRWBU"
   account_name               = "TX52777"
   trust_activation_confirmed = true
 }
 
-run "unconfirmed_trust_blocks_stage_creation" {
+run "unconfirmed_trust_blocks_entire_apply" {
   command = plan
   variables {
     trust_activation_confirmed = false
@@ -34,10 +34,6 @@ run "reject_builtin_role_name" {
 run "platform_boundaries" {
   command = apply
 
-  assert {
-    condition     = snowflake_storage_integration_aws.ticks.storage_allowed_locations == toset(["s3://offline-test-bucket/publish/"])
-    error_message = "The storage integration must be scoped to publish/ only."
-  }
   assert {
     condition = (
       snowflake_warehouse.ticks.warehouse_size == "XSMALL" &&
@@ -65,5 +61,9 @@ run "platform_boundaries" {
   assert {
     condition     = snowflake_stage.publish.url == "s3://offline-test-bucket/publish/"
     error_message = "The stage must point only at the publish/ prefix."
+  }
+  assert {
+    condition     = snowflake_stage.publish.storage_integration == var.integration_name
+    error_message = "The stage must reference the bootstrap root's storage integration."
   }
 }

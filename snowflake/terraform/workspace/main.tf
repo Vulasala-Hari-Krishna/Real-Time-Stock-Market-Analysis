@@ -7,13 +7,8 @@ terraform {
     }
   }
 
-  # Remote state, same reason as the Databricks roots: the storage
-  # integration's generated IAM values must be read back after the first
-  # apply, fed into CloudFormation trust activation, then the stage (gated
-  # on that activation) applied in a later run. A disposable CI runner has
-  # no local disk continuity between those applies.
   backend "s3" {
-    key     = "snowflake/terraform.tfstate"
+    key     = "snowflake/workspace.tfstate"
     encrypt = true
   }
 }
@@ -24,15 +19,6 @@ variable "bucket" {
   validation {
     condition     = can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.bucket))
     error_message = "Provide a bucket name, not an S3 URI or prefix."
-  }
-}
-
-variable "storage_role_arn" {
-  type        = string
-  description = "Role ARN exported by the 07-snowflake-storage-role stack."
-  validation {
-    condition     = can(regex("^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$", var.storage_role_arn))
-    error_message = "Provide the actual AWS IAM role ARN; not a user or root principal."
   }
 }
 
@@ -84,15 +70,18 @@ variable "credit_quota" {
   }
 }
 
-variable "trust_activation_confirmed" {
-  type        = bool
-  default     = false
-  description = "Set true only after activating exact IAM trust on the storage role stack."
+variable "integration_name" {
+  type        = string
+  description = "Existing storage integration name, from the bootstrap root's integration_name output."
+  validation {
+    condition     = can(regex("^[A-Z][A-Z0-9_]{0,63}$", var.integration_name))
+    error_message = "Provide the bootstrap root's integration identifier."
+  }
 }
 
 variable "organization_name" {
   type        = string
-  description = "Organization segment of the Snowflake account identifier (before the hyphen, e.g. ILMRWBU in ILMRWBU-TX52777). Not a secret."
+  description = "Organization segment of the Snowflake account identifier. Not a secret."
   validation {
     condition     = can(regex("^[A-Za-z][A-Za-z0-9]{0,63}$", var.organization_name))
     error_message = "Provide the organization name segment of the account identifier."
@@ -101,19 +90,19 @@ variable "organization_name" {
 
 variable "account_name" {
   type        = string
-  description = "Account segment of the Snowflake account identifier (after the hyphen, e.g. TX52777 in ILMRWBU-TX52777). Not a secret."
+  description = "Account segment of the Snowflake account identifier. Not a secret."
   validation {
     condition     = can(regex("^[A-Za-z][A-Za-z0-9]{0,63}$", var.account_name))
     error_message = "Provide the account name segment of the account identifier."
   }
 }
 
-# User/private key come from SNOWFLAKE_USER/SNOWFLAKE_PRIVATE_KEY env vars,
-# matching how the Databricks provider reads DATABRICKS_TOKEN - never pass
-# credentials as Terraform variables. Provider 2.x does NOT read
-# SNOWFLAKE_ACCOUNT (confirmed live 2026-09-25: it emits "environment
-# variable is ignored" and requires the PROVIDER_CONFIGURATION_ACCOUNT_FALLBACK
-# experiment); organization_name/account_name must be set explicitly instead.
+variable "trust_activation_confirmed" {
+  type        = bool
+  default     = false
+  description = "Set true only after activating exact IAM trust on the storage role stack and applying the bootstrap root."
+}
+
 provider "snowflake" {
   organization_name = var.organization_name
   account_name       = var.account_name
@@ -178,36 +167,33 @@ resource "snowflake_grant_privileges_to_account_role" "schema_privileges" {
   }
 }
 
-resource "snowflake_storage_integration_aws" "ticks" {
-  name                      = "${var.database_name}_PUBLISH_INTEGRATION"
-  enabled                   = true
-  storage_provider          = "S3"
-  storage_aws_role_arn      = var.storage_role_arn
-  storage_allowed_locations = ["s3://${var.bucket}/publish/"]
-  comment                   = "Hybrid publish/ snapshots only; least-privilege read-only IAM role."
-}
-
+# This root is applied exactly once, only after the bootstrap root has run
+# and CloudFormation trust is real - so this precondition never actually
+# blocks anything in ordinary use. Kept anyway as a defensive guard against
+# applying this root too early (same reasoning as the Databricks workspace
+# root's identical pattern). Verified live (2026-09-25): a failed
+# precondition blocks the ENTIRE apply, not just this resource - which is
+# exactly why the storage integration lives in the separate, ungated
+# bootstrap root instead of here.
 resource "snowflake_stage" "publish" {
   name                = "${var.database_name}_PUBLISH_STAGE"
   database            = snowflake_database.ticks.name
   schema              = snowflake_schema.staging.name
   url                 = "s3://${var.bucket}/publish/"
-  storage_integration = snowflake_storage_integration_aws.ticks.name
+  storage_integration = var.integration_name
   comment             = "Read-only external stage over completed export batches."
 
   lifecycle {
     precondition {
       condition     = var.trust_activation_confirmed
-      error_message = "Activate and validate exact CloudFormation trust first."
+      error_message = "Activate and validate exact CloudFormation trust and apply the bootstrap root first."
     }
   }
 }
 
 # Unverified: the on_schema_object block shape (object_type/object_name for a
 # STAGE) is inferred from the confirmed on_account_object/on_schema patterns
-# above, not confirmed directly against the provider docs. May need one
-# fix-iteration against a real `terraform plan`, same as the Databricks
-# databricks_permissions incident earlier this session.
+# above, not confirmed directly against the provider docs.
 resource "snowflake_grant_privileges_to_account_role" "stage_usage" {
   account_role_name = snowflake_account_role.loader.name
   privileges        = ["USAGE"]
@@ -215,19 +201,6 @@ resource "snowflake_grant_privileges_to_account_role" "stage_usage" {
     object_type = "STAGE"
     object_name = snowflake_stage.publish.fully_qualified_name
   }
-}
-
-# Unverified: describe_output is documented as a List of Object; [0] indexing
-# is the expected access pattern but has not been exercised against a live
-# apply.
-output "iam_principal_arn" {
-  value       = snowflake_storage_integration_aws.ticks.describe_output[0].iam_user_arn
-  description = "Exact principal for CloudFormation SnowflakeIamUserArn."
-}
-
-output "external_id" {
-  value       = snowflake_storage_integration_aws.ticks.describe_output[0].external_id
-  description = "Exact external ID for CloudFormation SnowflakeExternalId. Not an API secret."
 }
 
 output "warehouse_name" {
