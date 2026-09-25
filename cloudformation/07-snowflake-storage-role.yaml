@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Optional Snowflake storage integration IAM role. Initially denies all
+  assumption; enable trust only after obtaining the storage integration's
+  actual AWS IAM user ARN and external ID via its describe_output. Creates
+  no compute or access keys.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+    Description: Environment matching the hybrid access stack
+  ProjectName:
+    Type: String
+    Default: stock-market-pipeline
+    AllowedPattern: '^[a-z][a-z0-9-]{0,29}$'
+    Description: Project name matching the hybrid access stack
+  EnableSnowflakeTrust:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Explicit second-stage activation after the storage integration is created
+  SnowflakeIamUserArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:iam::[0-9]{12}:user/[A-Za-z0-9+=,.@_/-]+$'
+    Description: Exact IAM user ARN returned by the Snowflake storage integration
+  SnowflakeExternalId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[A-Za-z0-9+=,.@:/_-]{2,1224}$'
+    Description: Exact external ID generated for this storage integration
+
+Rules:
+  RequireGeneratedTrustValues:
+    RuleCondition: !Equals [!Ref EnableSnowflakeTrust, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref SnowflakeIamUserArn, '']]
+        AssertDescription: Trust activation requires the generated IAM user ARN
+      - Assert: !Not [!Equals [!Ref SnowflakeExternalId, '']]
+        AssertDescription: Trust activation requires the generated external ID
+
+Conditions:
+  TrustEnabled: !Equals [!Ref EnableSnowflakeTrust, 'true']
+
+Resources:
+  SnowflakeStorageRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-snowflake-storage-${Environment}'
+      Description: Snowflake external stage storage access only; read-only publish/
+      MaxSessionDuration: 3600
+      ManagedPolicyArns:
+        - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-SnowflakePublishPolicyArn'
+      AssumeRolePolicyDocument: !If
+        - TrustEnabled
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: SnowflakeAssume
+              Effect: Allow
+              Principal:
+                AWS: !Ref SnowflakeIamUserArn
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  sts:ExternalId: !Ref SnowflakeExternalId
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: BootstrapDenyAllAssumption
+              Effect: Deny
+              Principal:
+                AWS: '*'
+              Action: sts:AssumeRole
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  SnowflakeStorageRoleArn:
+    Description: Role ARN for the Snowflake storage integration
+    Value: !GetAtt SnowflakeStorageRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-SnowflakeStorageRoleArn'
+  SnowflakeTrustEnabled:
+    Description: Whether assumption by the specified Snowflake IAM user is enabled
+    Value: !Ref EnableSnowflakeTrust

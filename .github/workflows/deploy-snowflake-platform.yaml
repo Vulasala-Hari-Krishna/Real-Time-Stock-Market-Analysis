@@ -1,0 +1,275 @@
+name: Deploy Snowflake Platform
+
+# Automates the Snowflake platform bootstrap: CloudFormation stack 07 (deny-
+# all IAM role) -> Terraform apply #1 (storage integration + warehouse/
+# database/schema/role/grants; the external stage is gated behind trust and
+# fails its precondition on this pass, by design) -> reads the storage
+# integration's generated IAM user ARN/external ID -> re-deploys stack 07
+# with real trust -> Terraform apply #2 (now the stage + its grant succeed).
+# Same remote-state S3 backend as the Databricks roots (stack 00), same
+# job-output-passing pattern - no manual value copying between steps.
+#
+# Prerequisites: stacks 00 and 01 already deployed (00 via
+# deploy-databricks-platform.yaml, 01 via deploy-infra.yaml). Needs repo
+# secrets AWS_DEPLOY_ROLE_ARN (existing), SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER,
+# SNOWFLAKE_PRIVATE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      aws-region:
+        description: 'AWS region (must match the Databricks platform deploy)'
+        required: true
+        default: 'us-east-2'
+        type: string
+      database_name:
+        description: 'Snowflake database name'
+        required: true
+        default: 'STOCK_MARKET_DEV'
+        type: string
+      schema_name:
+        description: 'Snowflake staging schema name'
+        required: true
+        default: 'PUBLISH_STAGING'
+        type: string
+      warehouse_name:
+        description: 'Snowflake warehouse name'
+        required: true
+        default: 'STOCK_MARKET_DEV_WH'
+        type: string
+      loader_role_name:
+        description: 'Least-privilege Snowflake role for routine loads'
+        required: true
+        default: 'STOCK_MARKET_DEV_LOADER'
+        type: string
+      credit_quota:
+        description: 'Resource monitor credit quota (max 25)'
+        required: true
+        default: '10'
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+  SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+  SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+
+jobs:
+  bootstrap:
+    name: Bootstrap State Backend + IAM Role (00, 07)
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      state_bucket: ${{ steps.state.outputs.bucket }}
+      lock_table: ${{ steps.state.outputs.table }}
+      storage_role_arn: ${{ steps.role.outputs.arn }}
+      data_bucket: ${{ steps.databucket.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Deploy Terraform state backend (stack 00, idempotent)
+        run: |
+          aws cloudformation deploy \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --template-file cloudformation/00-terraform-state.yaml \
+            --parameter-overrides "Environment=${{ inputs.environment }}" "ProjectName=stock-market-pipeline" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region "${{ inputs.aws-region }}" \
+            --no-fail-on-empty-changeset
+
+      - name: Read state backend outputs
+        id: state
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformStateBucketName'].OutputValue" --output text)
+          TABLE=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformLockTableName'].OutputValue" --output text)
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "table=${TABLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Snowflake storage-role stack (07), trust disabled
+        run: |
+          aws cloudformation deploy \
+            --stack-name "stock-market-pipeline-07-snowflake-storage-role-${{ inputs.environment }}" \
+            --template-file cloudformation/07-snowflake-storage-role.yaml \
+            --parameter-overrides \
+              "Environment=${{ inputs.environment }}" \
+              "ProjectName=stock-market-pipeline" \
+              "EnableSnowflakeTrust=false" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region "${{ inputs.aws-region }}" \
+            --no-fail-on-empty-changeset
+
+      - name: Read storage role ARN
+        id: role
+        run: |
+          ARN=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-07-snowflake-storage-role-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='SnowflakeStorageRoleArn'].OutputValue" --output text)
+          echo "arn=${ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Read project data-lake bucket name (requires stack 01 already deployed)
+        id: databucket
+        run: |
+          NAME=$(aws cloudformation list-exports --region "${{ inputs.aws-region }}" \
+            --query "Exports[?Name=='stock-market-pipeline-${{ inputs.environment }}-DataLakeBucketName'].Value" \
+            --output text)
+          if [ -z "${NAME}" ]; then
+            echo "ERROR: stack 01 (S3 datalake) export not found in ${{ inputs.aws-region }}." >&2
+            exit 1
+          fi
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+
+  platform-bootstrap:
+    name: 'Terraform apply #1 (integration + warehouse/db/schema/role; stage intentionally blocked)'
+    runs-on: ubuntu-latest
+    needs: bootstrap
+    environment: ${{ inputs.environment }}
+    outputs:
+      iam_principal_arn: ${{ steps.outputs.outputs.iam_principal_arn }}
+      external_id: ${{ steps.outputs.outputs.external_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state)
+        working-directory: snowflake/terraform
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ needs.bootstrap.outputs.state_bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ needs.bootstrap.outputs.lock_table }}"
+
+      - name: Terraform apply (trust_activation_confirmed=false; stage precondition expected to fail)
+        id: apply
+        working-directory: snowflake/terraform
+        continue-on-error: true
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="bucket=${{ needs.bootstrap.outputs.data_bucket }}" \
+            -var="storage_role_arn=${{ needs.bootstrap.outputs.storage_role_arn }}" \
+            -var="database_name=${{ inputs.database_name }}" \
+            -var="schema_name=${{ inputs.schema_name }}" \
+            -var="warehouse_name=${{ inputs.warehouse_name }}" \
+            -var="loader_role_name=${{ inputs.loader_role_name }}" \
+            -var="credit_quota=${{ inputs.credit_quota }}" \
+            -var="trust_activation_confirmed=false"
+
+      - name: Capture generated IAM trust values
+        id: outputs
+        working-directory: snowflake/terraform
+        run: |
+          echo ">>> Previous apply outcome: ${{ steps.apply.outcome }} (failure here is expected -"
+          echo ">>> the stage's precondition blocks it deliberately until trust is activated)."
+          PRINCIPAL=$(terraform output -raw iam_principal_arn)
+          EXTERNAL=$(terraform output -raw external_id)
+          if [ -z "${PRINCIPAL}" ] || [ -z "${EXTERNAL}" ]; then
+            echo "ERROR: storage integration outputs are empty - a resource other than" >&2
+            echo "the gated stage failed. Check the apply log above before continuing." >&2
+            exit 1
+          fi
+          echo "iam_principal_arn=${PRINCIPAL}" >> "$GITHUB_OUTPUT"
+          echo "external_id=${EXTERNAL}" >> "$GITHUB_OUTPUT"
+
+  activate-trust:
+    name: Activate Snowflake IAM Trust (07, second phase)
+    runs-on: ubuntu-latest
+    needs: [bootstrap, platform-bootstrap]
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Re-deploy stack 07 with the real generated trust values
+        run: |
+          aws cloudformation deploy \
+            --stack-name "stock-market-pipeline-07-snowflake-storage-role-${{ inputs.environment }}" \
+            --template-file cloudformation/07-snowflake-storage-role.yaml \
+            --parameter-overrides \
+              "Environment=${{ inputs.environment }}" \
+              "ProjectName=stock-market-pipeline" \
+              "EnableSnowflakeTrust=true" \
+              "SnowflakeIamUserArn=${{ needs.platform-bootstrap.outputs.iam_principal_arn }}" \
+              "SnowflakeExternalId=${{ needs.platform-bootstrap.outputs.external_id }}" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region "${{ inputs.aws-region }}" \
+            --no-fail-on-empty-changeset
+
+  platform-finish:
+    name: 'Terraform apply #2 (external stage, now trust-activated)'
+    runs-on: ubuntu-latest
+    needs: [bootstrap, activate-trust]
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state)
+        working-directory: snowflake/terraform
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ needs.bootstrap.outputs.state_bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ needs.bootstrap.outputs.lock_table }}"
+
+      - name: Terraform apply (trust_activation_confirmed=true)
+        working-directory: snowflake/terraform
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="bucket=${{ needs.bootstrap.outputs.data_bucket }}" \
+            -var="storage_role_arn=${{ needs.bootstrap.outputs.storage_role_arn }}" \
+            -var="database_name=${{ inputs.database_name }}" \
+            -var="schema_name=${{ inputs.schema_name }}" \
+            -var="warehouse_name=${{ inputs.warehouse_name }}" \
+            -var="loader_role_name=${{ inputs.loader_role_name }}" \
+            -var="credit_quota=${{ inputs.credit_quota }}" \
+            -var="trust_activation_confirmed=true"
+
+      - name: Print platform outputs
+        working-directory: snowflake/terraform
+        run: terraform output -json
