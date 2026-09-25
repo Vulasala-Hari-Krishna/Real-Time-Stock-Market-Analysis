@@ -11,19 +11,22 @@ chat history, assistant memory, or access to a particular model.
 - Repository anchor before this documentation update: `07cb728`, with a clean
   worktree. Check `git status --short --branch` and `git log -5 --oneline` on resume;
   this anchor is historical, not a claim about future HEAD.
-- **Current position:** raw landing and one Databricks quote-processing slice are
-  implemented and locally validated. Platform IaC has been revised for the account
-  actually in use (Databricks **Free Edition**, workspace region `us-east-2`,
-  serverless compute only — see "2026-09-24: Free Edition preflight" below) but
-  not yet applied. Deployment and live end-to-end job validation remain pending.
-  Snowflake integration is not implemented.
+- **Current position: R1 is DONE (2026-09-25).** The Databricks Free Edition
+  platform bootstrap (storage credential, all 6 external locations,
+  catalog/schemas, runtime service principal) and the actual quote-processing
+  job (Auto Loader ingest -> bronze -> silver -> gold, on serverless compute)
+  both ran live and succeeded against the real project bucket in `us-east-2`,
+  via the fully automated `deploy-databricks-platform.yaml` +
+  `deploy-databricks-job.yaml` GitHub Actions pipeline. Raw landing (local,
+  opt-in) remains implemented but not yet exercised against live Kafka.
+  Snowflake integration is not implemented — that's the next slice (R2-R4).
 - Prior AWS resources: the user confirmed a full AWS teardown/cleanup was
-  completed before this session, so the account is a clean slate. No real cloud
-  deployment, Terraform apply, ingestion run, or destruction has been performed
-  by the migration work recorded here.
-- The next task is **deploying CloudFormation stacks `01`/`05`/`06` in `us-east-2`**
-  and running the credential Terraform root, not silently adding more services or
-  declaring the pipeline done. See "Next Session" below for the exact sequence.
+  completed before this session began, so the account started from a clean
+  slate; the resources above are the first ones this migration has created.
+- The next task is **R2: the gold snapshot exporter and manifest** (see
+  "Remaining Roadmap" below), not silently adding more services or declaring
+  the whole pipeline done — R1 is one Databricks slice, not the full
+  hybrid architecture.
 
 ### Reading Order
 
@@ -186,53 +189,59 @@ belong to Terraform. Managed catalog storage has its own nonoverlapping prefix.
 
 ## Next Session: Concrete Starting Point
 
-Account/capability preflight is done (see "Decisions To Preserve" above): AWS is
-a confirmed clean slate, the Databricks account is Free Edition (workspace
-`7474656307742289`, region `us-east-2`, storage credentials to a self-owned S3
-bucket verified working), and the user deploys everything through GitHub
-Actions with OIDC rather than local CLI credentials. The concrete remaining
-sequence:
+**R1 is done (2026-09-25).** Stacks `01`-`06`, both Terraform roots, all 6
+external locations, the catalog/schemas/service principal, and the actual
+`landed_ticks` job all exist and ran successfully live in `us-east-2` against
+the real project bucket and Databricks Free Edition workspace
+(`7474656307742289`), via the fully automated
+[deploy-databricks-platform.yaml](../.github/workflows/deploy-databricks-platform.yaml)
++ [deploy-databricks-job.yaml](../.github/workflows/deploy-databricks-job.yaml)
+pipeline. Two real bugs were found and fixed along the way (IAM trust-policy
+principal syntax; an empty-prefix Unity Catalog validation quirk) plus one
+architecture correction (dropped `run_as: service_principal_name` — see the
+2026-09-25 change-ledger rows for the full story before repeating either).
 
-**Steps 1-4 below are DONE as of 2026-09-25** (stacks `01`-`06`, both Terraform
-roots, all 6 external locations, the catalog/schemas/service principal exist
-live in the real workspace/bucket in `us-east-2`). Remaining:
+**Loose ends on R1, worth closing before calling it fully proven** (not
+blocking R2, but cheap to do first):
+1. Manually check `ticks_pipeline_state`'s `status` column and
+   `quote_samples`/`ticks_quarantine` row counts in a Databricks notebook —
+   the automated pipeline only proved the five tables exist and the job
+   returned success, not their row-level contents (no SQL warehouse is
+   deployed for this slice).
+2. Re-run `deploy-databricks-job.yaml` a second time and confirm it's a
+   correct no-op/skip (same bronze version, `snapshot_is_current` should
+   return true) — replay/idempotency is one of R1's stated completion
+   criteria and hasn't been exercised yet.
+3. Land one fixture that's designed to fail validation (bad symbol, non-finite
+   price, etc.) and confirm it lands in `ticks_quarantine` with a sensible
+   `rejection_reason`, not silently dropped.
 
-1. ~~Deploy stacks `01`-`04`~~ — done.
-2. ~~Run `deploy-databricks-platform.yaml`~~ — done; all resources created
-   (one retry needed for the `landing` external location — see change ledger).
-3. ~~Confirm external locations with Test Connection~~ — proven via the
-   equivalent check on the personal test bucket during preflight; the real
-   bucket's locations were created but not yet individually re-tested in the UI.
-4. Run [deploy-databricks-job.yaml](../.github/workflows/deploy-databricks-job.yaml)
-   — reads `bundle_variables` straight from the `workspace` root's remote state
-   (no manual copying), generates and uploads a small known-good fixture tick
-   file, then runs `databricks bundle validate/deploy/run -t dev`, then checks
-   the five owned tables exist via `databricks tables get`. The fixture was
-   verified locally by round-tripping it through the real
-   `src/batch/landed_ticks.py::normalize_envelope` — it passes validation
-   (`rejection_reason: None`), so it should land in `quote_samples`/
-   `daily_quote_summary`, not quarantine. The serverless
-   `environment_key`/`environments` block in `databricks.yml` is still
-   unverified against a live workspace — this run is the first real test of it.
-5. After that run, manually check `ticks_pipeline_state`'s `status` column and
-   `quote_samples`/`ticks_quarantine` row counts in a Databricks
-   notebook/SQL editor — `deploy-databricks-job.yaml` only proves the five
-   tables exist, not their row-level contents (no SQL warehouse is deployed
-   for this slice).
-6. Record versions/counts, quarantine cases, replay/no-op behavior,
-   failed-publication recovery, and measured cost in this ledger before
-   proceeding to the first snapshot exporter/Snowflake slice. To tear down,
-   run [teardown-databricks-platform.yaml](../.github/workflows/teardown-databricks-platform.yaml)
-   (same catalog/schema_prefix/credential_name inputs as the deploy run) — it
-   deliberately does not delete stack `00`'s state bucket/lock table
-   (`DeletionPolicy: Retain`); remove those manually only after confirming both
-   Terraform roots destroyed cleanly.
+**Next real task: R2, the gold snapshot exporter and manifest.** This is the
+piece that lets Snowflake (R3/R4) consume Databricks' gold output without
+ever reading Delta's physical files directly. Concretely: read
+`daily_quote_summary` at a pinned Delta version, write it as an immutable
+Parquet snapshot to `publish/batches/<batch_id>/daily_quote_summary/`, and
+write `publish/batches/<batch_id>/manifest.json` **last** (schema identity,
+source table version, file list with checksums/row counts, `status:
+completed`) — see the "Gold Snapshot Contract v1" section in
+[docs/hybrid-migration.md](hybrid-migration.md#gold-snapshot-contract-v1) for
+the full contract this must satisfy. No code exists for this yet — it needs
+its own Python module, tests, and a decision on where it runs (a new
+Databricks bundle task, or a local/Airflow-triggered job reading via the
+Delta Python API).
+
+To tear down the Databricks platform, run
+[teardown-databricks-platform.yaml](../.github/workflows/teardown-databricks-platform.yaml)
+(same catalog/schema_prefix/credential_name inputs as the deploy run) — it
+deliberately does not delete stack `00`'s state bucket/lock table
+(`DeletionPolicy: Retain`); remove those manually only after confirming both
+Terraform roots destroyed cleanly.
 
 ## Remaining Roadmap And Completion Criteria
 
 | ID | Work to implement or verify | Done when |
 |----|----------------------------|-----------|
-| R1 | Databricks Free Edition bootstrap and live quote slice (`us-east-2`) | Real IAM/UC/bundle checks pass on the actual Free Edition workspace; isolated fixture, replay, quarantine, and recovery evidence recorded. Storage-credential/external-location half already verified against a personal test bucket; remaining work is stacks `05`/`06` + both Terraform roots against the real project bucket, then one authorized serverless job run |
+| R1 | ~~Databricks Free Edition bootstrap and live quote slice (`us-east-2`)~~ | **DONE 2026-09-25.** Live run succeeded: platform bootstrap + `databricks bundle run` completed successfully against the real project bucket/workspace on serverless compute; the five owned tables exist. Not yet done: replay (run twice, confirm no-op/idempotent skip), a deliberate quarantine-triggering fixture, and a failure/recovery drill — worth doing before treating R1 as fully proven, not just "ran once successfully" |
 | R2 | Gold snapshot exporter and manifest validation | Reads completed version set through Delta APIs; immutable files/checksums/counts/schema/sequence; manifest last; incomplete/stale/repeated batches tested |
 | R3 | Snowflake platform IaC and safe identity bootstrap | One auto-suspending X-Small warehouse, role-separated grants, storage integration/stage, database/schemas, cost controls and destroy path; live access authorized and tested |
 | R4 | Snowflake snapshot loader and analytical model | Exact manifest files load to staging; key/schema/count checks; atomic DML publication plus batch ledger; empty snapshots/corrections/deletions/retries covered; results reconcile to Delta |
@@ -338,6 +347,8 @@ source for exact diffs. Dates/revisions below describe completed prior work.
 | 2026-09-24 | Free Edition preflight and serverless re-plan | User confirmed AWS teardown complete and provided Databricks account details (workspace `7474656307742289`, `us-east-2`). Live-tested Unity Catalog storage credential + external location against a personal S3 bucket in the user's actual Free Edition workspace: Test Connection passed all checks, and a serverless notebook wrote/read a real Delta table through it — corrected the prior (incorrect) assumption that Free Edition cannot use external S3 storage. Removed `databricks_cluster_policy`/`databricks_permissions` from `workspace/main.tf` and the classic `job_clusters` block from `databricks.yml` (replaced with a serverless `environment_key`/`environments` block); updated the matching Terraform test (`workspace/safety.tftest.hcl`) and Python test (`tests/unit/test_databricks_ticks.py`); updated `databricks/README.md`, `databricks/terraform/README.md`, `docs/hybrid-migration.md` to state verified Free Edition compatibility instead of the earlier uncertainty. Moved the project's AWS region default from `us-east-1` to `us-east-2` in `deploy-infra.yaml`/`teardown-infra.yaml`. Added `cloudformation/deploy-hybrid.sh` + `teardown-hybrid.sh` and `.github/workflows/deploy-hybrid-infra.yaml` + `teardown-hybrid-infra.yaml` to bring stacks `05`/`06` under the same GitHub-Actions-with-OIDC pattern already used for stacks `01`-`04`, since the user deploys everything via GitHub Actions rather than local CLI credentials. Uncommitted; `pytest tests/unit/test_databricks_ticks.py` (34 passed) and a YAML syntax check on all edited workflow/bundle files were run — `terraform fmt/validate/test` for the edited `workspace` root was **not** re-run (Terraform CLI unavailable in this environment) and remains a gate before the next real apply |
 | 2026-09-25 | First live run of `deploy-databricks-platform.yaml`; R1 platform bootstrap complete; job-deploy automation added | Real run against the actual AWS account/workspace surfaced and fixed two genuine bugs, not environment misconfiguration: (1) `06-databricks-storage-role.yaml`'s deny-all bootstrap statement used `Principal: '*'`, which IAM trust policies reject (they require a typed principal like `{"AWS": "*"}`, unlike S3-style resource policies) — fixed, and `tests/unit/test_databricks_platform.py` updated to match; (2) the `landing` external location (the only `read_only=true` one) failed Unity Catalog's creation-time validation with a misleading "no LIST permission" error, because a brand-new bucket has zero objects under `landing/ticks/` and UC can't use its usual write-probe validation on a read-only path — fixed by adding an automated placeholder-object step (`landing/ticks/.keep` via `aws s3api put-object`, using a real temp file after `--body /dev/null` itself hit an unrelated AWS CLI/botocore quirk) to the `bootstrap` job. After both fixes, a full run succeeded: catalog `stock_market_dev`, 3 schemas, all 6 external locations, the runtime service principal, and all grants exist live in `us-east-2` against the real project bucket. Remote state correctly preserved the 19 resources created before the `landing` failure, so the fix-and-retry only created what was missing. Added [deploy-databricks-job.yaml](../.github/workflows/deploy-databricks-job.yaml): reads `bundle_variables` directly from the `workspace` root's remote state (no manual copying), generates+uploads a small fixture tick file, runs `databricks bundle validate/deploy/run -t dev`, then checks the five owned tables exist via `databricks tables get`. The fixture-generation logic was verified locally by importing the real `src/batch/landed_ticks.py::normalize_envelope` and confirming the generated envelope passes (`rejection_reason: None`). **Not yet run**: `deploy-databricks-job.yaml` itself — this is the next concrete action |
 | 2026-09-25 | First live run of `deploy-databricks-job.yaml`; `run_as: service_principal_name` abandoned for this slice | `bundle validate` passed live for the first time (proves the serverless `environment_key`/`environments` syntax works against a real workspace). `bundle deploy` got as far as actually creating the job, then failed: `run_as: service_principal_name` requires the deploying identity to hold the "Service Principal User" role on that exact service principal (403 `PERMISSION_DENIED`); workspace-admin status does not grant it. **Two wrong fixes attempted before landing on the real one** — recorded so the next session doesn't repeat them: (1) an earlier documentation edit this same day had claimed Free Edition's lack of account-console access meant this grant could be skipped; live evidence proved that wrong. (2) The first fix attempt added a `databricks_permissions` resource with a `service_principal_id` argument; provider 1.88.0 rejects that argument name entirely ("Unsupported argument"). Investigation found the actual mechanism is `databricks_access_control_rule_set`, an **account-level** rule-set resource (`name = "accounts/<id>/servicePrincipals/<app_id>/ruleSets/default"`) — whether that account-level API path works from a workspace-scoped provider/token on Free Edition is unverified, and guessing a third time risked another failed cycle. **Final decision:** stop trying to run the job as the service principal. `databricks/databricks.yml` no longer sets `run_as`; the job now runs as the deploying admin (the default when `run_as` is omitted). The `runtime` service principal and its Unity Catalog grants in `workspace/main.tf` are unchanged and still created — just not wired up as the job's execution identity. Reverted the `deployer_user_name` variable and `runtime_service_principal_user` resource from `workspace/main.tf`/`safety.tftest.hcl` and the matching workflow inputs. Corrected `databricks/README.md` and `databricks/terraform/README.md` a second time, this time to the actually-verified state. Full unit suite re-run and passing (368 passed, 87% coverage); YAML syntax re-validated on all edited workflows. **Not yet run**: `deploy-databricks-platform.yaml` (to pick up the reverted `workspace/main.tf`) followed by `deploy-databricks-job.yaml` again — this is the next concrete action, and should be the one that finally completes R1 |
+| 2026-09-25 | **R1 complete**: second live run of `deploy-databricks-job.yaml` failed differently, fixed, third run succeeded | Second run got past the `run_as` fix and actually executed on serverless compute for ~2 minutes before failing: `[NOT_SUPPORTED_WITH_SERVERLESS] PERSIST TABLE is not supported on serverless compute`, from `classified = classify_ticks(bronze).cache()` in `src/batch/databricks_ticks.py`. Root cause verified against Databricks' own docs before fixing (not guessed): serverless compute runs on Spark Connect against shared elastic infrastructure with no stable executor to pin a cached block to, so the entire RDD-level API (cache/persist/unpersist/checkpoint, not just cache specifically) is unsupported there. Fix: removed `.cache()`/`.unpersist()` entirely; `classified` is recomputed on each of its several downstream actions instead, which is cheap given this slice's bounded (<=100,000 row) scale. Updated the matching mocked unit test to assert cache/unpersist are *not* called. Confirmed no other `.cache()`/`.persist()` calls exist anywhere in `src/`. Full suite re-passed (368 passed). Third run (`Deploy Databricks Job #3`) completed successfully: platform bootstrap + job both green against the real bucket/workspace in `us-east-2`, on serverless compute, with no manual steps. **R1's core objective is met.** Not yet exercised: replay/idempotency on a second run, a deliberate quarantine-triggering fixture, row-level content verification of `quote_samples`/`ticks_pipeline_state` (no SQL warehouse deployed to query them yet) — see "Next Session" for these as optional R1 hardening before R2 |
+| 2026-09-25 | Row-level check found 3 accepted quotes, not 1; made the CI fixture idempotent | Manual notebook check of `quote_samples` found 3 rows, not the expected 1. Root cause (verified by reasoning through the pipeline's own dedup rules, not assumed): every `deploy-databricks-job.yaml` run uploads its fixture **before** attempting deploy/run, so both earlier failed attempts (the `run_as` failure and the `.cache()` failure) had already uploaded their fixture to a `GITHUB_RUN_ID`-unique S3 key before failing downstream. Auto Loader correctly picked up all three leftover files once a run finally succeeded; since each had a different `source_id` and `quote_timestamp` (both derived from the run ID/wall-clock time), none were transport or business duplicates under `classify_ticks`' own rules, so all three were legitimately accepted, not a bug. Zero rows in `ticks_quarantine` and `status = 'completed'` in `ticks_pipeline_state` confirmed classification worked correctly on all three. Fixed by making the fixture fully deterministic: fixed `source_id` (`ci-fixture-v1`), fixed timestamp (`2026-01-01T00:00:00+00:00`), fixed S3 key (`landing/ticks/ci-fixture/fixture-v1.json.gz`) instead of one unique per run. This also means future re-runs exercise the no-op/replay path (Auto Loader tracks already-seen files by path in its checkpoint, so re-uploading the same path should mean nothing new to ingest) rather than accumulating one more accepted quote per trigger. Re-verified the fixed-value fixture still passes `normalize_envelope` (`rejection_reason: None`). **Not yet run**: a fourth `deploy-databricks-job.yaml` execution to confirm the no-op/replay behavior actually happens as expected. The 3 already-ingested rows are permanent in bronze/silver/gold for this catalog's lifetime (bronze is append-only/immutable by design; `rebuild_outputs` always full-rebuilds from bronze, never deletes bronze rows) — harmless test debris, not cleaned up, since deleting it would need an explicit destructive action the user hasn't requested |
 
 ### Required Update After Every Implementation Session
 
