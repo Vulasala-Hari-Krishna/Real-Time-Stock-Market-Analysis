@@ -7,17 +7,23 @@ workspace**. Local Kafka/raw capture and the legacy silver consumer are unchange
 This slice requires a workspace with Unity Catalog and external S3 access; it
 runs on **serverless compute**, not a classic job cluster.
 
-Databricks Free Edition has been verified capable of the storage half of this
-slice: a Unity Catalog storage credential and external location were created
-manually in the workspace UI against a personally owned S3 bucket, "Test
-Connection" passed all checks (Read/List/Write/Delete/Path Exists/Assume Role/
-Self-Assume Role/External ID Condition), and a serverless notebook successfully
-wrote and read back a real Delta table through that external location. Free
-Edition has **no classic compute at all**, which is why this bundle targets
-serverless; it also has no account console/account-level API access, which
-affects only the account-level Service Principal User step below, not the
-storage or compute path. The full Auto Loader job (this bundle, deployed and
-run) has not yet been exercised against a real workspace.
+Databricks Free Edition has been verified capable of every part of this slice
+except the streaming ingestion itself, through a real end-to-end run
+(2026-09-25): the platform bootstrap (storage credential, external locations,
+catalog/schemas, runtime service principal) applied cleanly against the real
+project bucket, and `databricks bundle validate/deploy` succeeded — including
+the serverless `environment_key`/`environments` bundle syntax, run for the
+first time against a live workspace. Free Edition has **no classic compute at
+all**, which is why this bundle targets serverless. It does *not* lack
+account console/account-level API access in a way that blocks anything here:
+deploying a job with `run_as: service_principal_name` needs the deploying
+identity to hold the "Service Principal User" role on that service principal,
+but that's a **workspace-level** permission — `workspace/main.tf` now grants
+it automatically via `databricks_permissions`, no account console involved.
+An earlier version of this doc incorrectly assumed that permission could be
+skipped on Free Edition; it can't, and it isn't optional on any edition, but
+it's fully automated now. The job itself (Auto Loader actually running against
+landed files) has not yet been exercised against a real workspace.
 
 ```text
 landing/ticks/**/*.json.gz

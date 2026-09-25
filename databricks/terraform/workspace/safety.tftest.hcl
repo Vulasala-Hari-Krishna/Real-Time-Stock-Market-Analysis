@@ -6,6 +6,7 @@ variables {
   schema_prefix              = "stocks"
   bucket                     = "offline-test-bucket"
   credential_name            = "stocks_dev_storage"
+  deployer_user_name         = "deployer@example.com"
   trust_activation_confirmed = true
 }
 
@@ -88,5 +89,14 @@ run "platform_boundaries" {
       output.bundle_variables.catalog == var.catalog
     )
     error_message = "Bundle inputs must refer to resources managed by this root."
+  }
+  assert {
+    condition = (
+      databricks_permissions.runtime_service_principal_user.service_principal_id == databricks_service_principal.runtime.id &&
+      length(databricks_permissions.runtime_service_principal_user.access_control) == 1 &&
+      databricks_permissions.runtime_service_principal_user.access_control[0].user_name == var.deployer_user_name &&
+      databricks_permissions.runtime_service_principal_user.access_control[0].permission_level == "CAN_USE"
+    )
+    error_message = "The deploying identity must hold the Service Principal User role on the runtime principal."
   }
 }

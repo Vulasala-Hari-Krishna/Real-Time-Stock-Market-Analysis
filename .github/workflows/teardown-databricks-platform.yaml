@@ -51,6 +51,11 @@ on:
         required: true
         default: 'stock_market_dev_ticks'
         type: string
+      deployer_user_name:
+        description: 'Same deployer_user_name used at deploy time'
+        required: true
+        default: 'vulasalaharikrishna@gmail.com'
+        type: string
 
 permissions:
   id-token: write
@@ -159,6 +164,7 @@ jobs:
             -var="schema_prefix=${{ inputs.schema_prefix }}" \
             -var="bucket=${{ needs.read-state-backend.outputs.data_bucket }}" \
             -var="credential_name=${{ inputs.credential_name }}" \
+            -var="deployer_user_name=${{ inputs.deployer_user_name }}" \
             -var="trust_activation_confirmed=true"
 
   destroy-credential:
