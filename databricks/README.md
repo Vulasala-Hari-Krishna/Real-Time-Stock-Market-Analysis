@@ -7,23 +7,31 @@ workspace**. Local Kafka/raw capture and the legacy silver consumer are unchange
 This slice requires a workspace with Unity Catalog and external S3 access; it
 runs on **serverless compute**, not a classic job cluster.
 
-Databricks Free Edition has been verified capable of every part of this slice
-except the streaming ingestion itself, through a real end-to-end run
-(2026-09-25): the platform bootstrap (storage credential, external locations,
-catalog/schemas, runtime service principal) applied cleanly against the real
-project bucket, and `databricks bundle validate/deploy` succeeded — including
-the serverless `environment_key`/`environments` bundle syntax, run for the
-first time against a live workspace. Free Edition has **no classic compute at
-all**, which is why this bundle targets serverless. It does *not* lack
-account console/account-level API access in a way that blocks anything here:
-deploying a job with `run_as: service_principal_name` needs the deploying
-identity to hold the "Service Principal User" role on that service principal,
-but that's a **workspace-level** permission — `workspace/main.tf` now grants
-it automatically via `databricks_permissions`, no account console involved.
-An earlier version of this doc incorrectly assumed that permission could be
-skipped on Free Edition; it can't, and it isn't optional on any edition, but
-it's fully automated now. The job itself (Auto Loader actually running against
-landed files) has not yet been exercised against a real workspace.
+Databricks Free Edition has been verified capable of every part of this
+slice's platform bootstrap through a real run (2026-09-25): the storage
+credential, all six external locations, the catalog/schemas, and the runtime
+service principal + its Unity Catalog grants applied cleanly against the real
+project bucket. Free Edition has **no classic compute at all**, which is why
+this bundle targets serverless.
+
+The bundle does **not** set `run_as: service_principal_name`, even though
+`workspace/main.tf` provisions a least-privilege `runtime` service principal
+with exactly that intent. Doing so needs the deploying identity to hold the
+"Service Principal User" role on that principal, which this provider version
+(1.88.0) only exposes through `databricks_access_control_rule_set`, an
+account-level rule-set resource (`name = "accounts/<id>/servicePrincipals/..."`)
+— and it's unverified whether that account-level API path is reachable from a
+workspace-scoped provider/token on Free Edition. Rather than guess at that a
+third time, the job currently runs as the deploying admin directly (the
+default when `run_as` is omitted). The `runtime` principal and its grants stay
+provisioned, unused for now, ready for whoever revisits this — worth retrying
+if the workspace is ever upgraded to one with account-console access, where
+the account-level rule-set resource is known to work.
+
+`databricks bundle validate` has been run once against a live workspace and
+passed, including the serverless `environment_key`/`environments` syntax.
+`bundle deploy`/`bundle run` (the actual Auto Loader job) have not yet
+completed successfully — that's the next concrete step.
 
 ```text
 landing/ticks/**/*.json.gz

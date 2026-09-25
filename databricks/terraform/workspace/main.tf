@@ -53,21 +53,6 @@ variable "bucket" {
   }
 }
 
-variable "deployer_user_name" {
-  type        = string
-  description = <<-EOT
-    Workspace login (email) of the identity that will run `databricks bundle
-    deploy`. Deploying a job with `run_as: service_principal_name` requires
-    the deploying identity to hold the "Service Principal User" role on that
-    exact service principal; this workspace-level grant exists independent of
-    account-console access, so it's needed even on Free Edition.
-  EOT
-  validation {
-    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.deployer_user_name))
-    error_message = "Provide the deploying identity's workspace login email."
-  }
-}
-
 variable "credential_name" {
   type        = string
   description = "Existing credential from the bootstrap root after exact IAM trust activation."
@@ -114,6 +99,13 @@ locals {
   })
 }
 
+# Least-privilege identity holding this slice's Unity Catalog grants. The
+# bundle does not currently set `run_as` to this principal (see the note in
+# databricks/databricks.yml): doing so needs its "Service Principal User"
+# role granted to the deploying identity, which this provider version only
+# exposes through an account-level rule-set resource of unverified
+# workspace-token compatibility. The job runs as the deploying admin instead;
+# this principal/grants stay provisioned for when that's revisited.
 resource "databricks_service_principal" "runtime" {
   display_name               = "${local.name}_ticks_runtime"
   active                     = true
@@ -128,21 +120,6 @@ resource "databricks_service_principal" "runtime" {
       condition     = var.trust_activation_confirmed
       error_message = "Complete the credential/IAM trust bootstrap before applying workspace resources."
     }
-  }
-}
-
-# Grants the deploying identity the "Service Principal User" role on the
-# runtime principal - a workspace-level permission required by
-# `databricks bundle deploy` whenever a job sets `run_as: service_principal_name`.
-# Without it, job creation fails with a 403 PERMISSION_DENIED even though the
-# deploying identity is a workspace admin; admin status alone does not grant
-# this role. Independent of account-console access.
-resource "databricks_permissions" "runtime_service_principal_user" {
-  service_principal_id = databricks_service_principal.runtime.id
-
-  access_control {
-    user_name        = var.deployer_user_name
-    permission_level = "CAN_USE"
   }
 }
 

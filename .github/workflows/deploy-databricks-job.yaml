@@ -97,7 +97,6 @@ jobs:
       BUNDLE_VAR_catalog: ${{ needs.read-platform-state.outputs.catalog }}
       BUNDLE_VAR_schema_prefix: ${{ needs.read-platform-state.outputs.schema_prefix }}
       BUNDLE_VAR_bucket: ${{ needs.read-platform-state.outputs.bucket }}
-      BUNDLE_VAR_run_as_service_principal: ${{ needs.read-platform-state.outputs.run_as_service_principal }}
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
     steps:

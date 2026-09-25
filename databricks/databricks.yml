@@ -9,11 +9,18 @@ variables:
     default: stocks
   bucket:
     description: Existing S3 bucket with governed landing/lakehouse/checkpoint access
-  run_as_service_principal:
-    description: Application ID of the least-privilege workspace service principal
 
-run_as:
-  service_principal_name: ${var.run_as_service_principal}
+# No `run_as`: the job runs as whoever deploys it (the current default when
+# `run_as` is omitted). Setting `run_as: service_principal_name` to the
+# least-privilege runtime principal would need that principal's "Service
+# Principal User" role granted to the deploying identity - a permission this
+# provider version exposes only through account-level rule-set resources
+# (databricks_access_control_rule_set with an `accounts/<id>/...` path), and
+# it's unverified whether that account-level API path works from a
+# workspace-scoped provider/token on Free Edition. Rather than guess at that
+# again, this personal single-admin slice runs the job as the deploying admin
+# directly. The `runtime` service principal and its Unity Catalog grants in
+# workspace/main.tf still exist and stay least-privilege-ready for later.
 
 artifacts:
   hybrid_wheel:

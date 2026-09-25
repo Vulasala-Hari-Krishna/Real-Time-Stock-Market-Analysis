@@ -300,12 +300,14 @@ def test_bundle_is_manual_bounded_and_uses_explicit_platform_inputs() -> None:
     environments = {env["environment_key"]: env for env in deployed["environments"]}
     assert environment_key in environments
     assert environments[environment_key]["spec"]["dependencies"]
-    for name in (
-        "catalog",
-        "bucket",
-        "run_as_service_principal",
-    ):
+    for name in ("catalog", "bucket"):
         assert "default" not in bundle["variables"][name]
+    # No run_as: the job runs as the deploying admin. Setting run_as to the
+    # least-privilege runtime service principal needs a "Service Principal
+    # User" grant this provider version can't reliably automate on Free
+    # Edition (see databricks/terraform/README.md).
+    assert "run_as" not in bundle
+    assert "run_as_service_principal" not in bundle["variables"]
     package = tomllib.loads((root / "databricks/pyproject.toml").read_text())
     assert (
         package["project"]["scripts"]["landed_ticks"]

@@ -51,11 +51,6 @@ on:
         required: true
         default: 'stock_market_dev_ticks'
         type: string
-      deployer_user_name:
-        description: 'Workspace login (email) that will run databricks bundle deploy - needs the Service Principal User role on the runtime principal'
-        required: true
-        default: 'vulasalaharikrishna@gmail.com'
-        type: string
 
 permissions:
   id-token: write
@@ -302,7 +297,6 @@ jobs:
             -var="schema_prefix=${{ inputs.schema_prefix }}" \
             -var="bucket=${{ needs.bootstrap.outputs.data_bucket }}" \
             -var="credential_name=${{ inputs.credential_name }}" \
-            -var="deployer_user_name=${{ inputs.deployer_user_name }}" \
             -var="trust_activation_confirmed=true"
 
       - name: Print bundle variables for the next stage (Databricks job deployment)
