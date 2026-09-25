@@ -2,9 +2,13 @@
 of a Databricks gold Delta table for Snowflake to load, per the "Gold Snapshot
 Contract v1" in docs/hybrid-migration.md.
 
-Reads via the lightweight ``deltalake`` package (no Spark/Databricks compute
-needed - the same approach the Streamlit dashboard already uses), so this
-runs anywhere with S3 access: locally, in CI, or later from Airflow.
+Reads via ``deltalake`` for version/metadata resolution and DuckDB's delta
+extension for the actual row data - no Spark/Databricks compute needed - so
+this runs anywhere with S3 access: locally, in CI, or later from Airflow.
+Row reads go through DuckDB specifically because ``deltalake`` cannot read
+tables with Databricks' default ``deletionVectors`` reader feature enabled
+(verified directly against the latest deltalake release, not assumed);
+DuckDB's delta extension (delta-kernel-rs) does support it.
 
 Contract highlights this module enforces:
   - Read at one pinned Delta version; never scan physical Parquet directly.
@@ -139,10 +143,42 @@ def _s3_storage_options() -> dict[str, str] | None:
     return present or None
 
 
+def _read_delta_rows(path: str, version: int, region: str | None) -> pa.Table:
+    """Read a Delta table's rows at an exact version via DuckDB's delta extension.
+
+    ``deltalake`` (delta-rs) cannot read tables where Databricks has enabled
+    the ``deletionVectors`` reader feature - verified directly (not assumed):
+    even the latest deltalake release raises ``DeltaProtocolError`` on
+    ``to_pyarrow_table()`` for such a table, though its own metadata calls
+    (``DeltaTable(...).version()``) work fine since they never touch row
+    data. DuckDB's delta extension (built on delta-kernel-rs) does support
+    it, so it does the actual row read instead.
+
+    Args:
+        path: The table's Delta location (local path or ``s3://`` URI).
+        version: Exact Delta version to read (already resolved by the caller).
+        region: AWS region for S3 access, if reading from S3.
+
+    Returns:
+        The dataset's rows at that version, as a PyArrow table.
+    """
+    import duckdb
+
+    con = duckdb.connect()
+    con.sql("INSTALL delta; LOAD delta; INSTALL httpfs; LOAD httpfs;")
+    if path.startswith("s3://"):
+        region_clause = f", REGION '{region}'" if region else ""
+        con.sql(f"CREATE SECRET (TYPE s3, PROVIDER credential_chain{region_clause})")
+    reader = con.sql(
+        f"SELECT * FROM delta_scan('{path}', version => {version})"
+    ).arrow()
+    return reader.read_all() if hasattr(reader, "read_all") else reader
+
+
 def read_gold_table(
     config: GoldExportConfig, version: int | None = None
 ) -> tuple[pa.Table, int]:
-    """Read the configured gold dataset via the Delta transaction log.
+    """Read the configured gold dataset at one pinned Delta version.
 
     Args:
         config: Identifies the exact table to read.
@@ -153,11 +189,15 @@ def read_gold_table(
     """
     from deltalake import DeltaTable
 
-    delta_table = DeltaTable(
+    # Resolving the version is metadata-only (reads the transaction log, not
+    # row data), so it works even on a deletionVectors-enabled table.
+    metadata_table = DeltaTable(
         config.source_path(), version=version, storage_options=_s3_storage_options()
     )
-    table = delta_table.to_pyarrow_table()
-    return table, delta_table.version()
+    resolved_version = metadata_table.version()
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    table = _read_delta_rows(config.source_path(), resolved_version, region)
+    return table, resolved_version
 
 
 def assert_business_keys_unique(

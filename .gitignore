@@ -49,6 +49,9 @@ crash.*.log
 *.csv
 !tests/**/*.csv
 
+# Local scratch directories from ad-hoc verification scripts
+scratch_*/
+
 # Docker
 docker/volumes/
 
