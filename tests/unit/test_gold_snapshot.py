@@ -1,6 +1,7 @@
 """Unit tests for the gold snapshot exporter (src/export/gold_snapshot.py)."""
 
 from datetime import date
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -44,6 +45,31 @@ def test_config_paths(config: export.GoldExportConfig) -> None:
         config.publish_prefix("batch-1")
         == "publish/batches/batch-1/daily_quote_summary"
     )
+
+
+# ---------------------------------------------------------------------------
+# _read_delta_rows (real deltalake + DuckDB, no mocks - this is what caught
+# the deletionVectors incompatibility live and must not regress)
+# ---------------------------------------------------------------------------
+def test_read_delta_rows_handles_deletion_vector_table(tmp_path: Path) -> None:
+    from deltalake import write_deltalake
+
+    path = str(tmp_path / "dv_table").replace("\\", "/")
+    write_deltalake(
+        path,
+        pa.table({"symbol": ["AAPL"], "price": [150.0]}),
+        mode="overwrite",
+        configuration={"delta.enableDeletionVectors": "true"},
+    )
+    write_deltalake(
+        path, pa.table({"symbol": ["MSFT"], "price": [300.0]}), mode="overwrite"
+    )
+
+    latest = export._read_delta_rows(path, version=1, region=None)
+    assert latest.to_pydict() == {"symbol": ["MSFT"], "price": [300.0]}
+
+    pinned = export._read_delta_rows(path, version=0, region=None)
+    assert pinned.to_pydict() == {"symbol": ["AAPL"], "price": [150.0]}
 
 
 # ---------------------------------------------------------------------------
