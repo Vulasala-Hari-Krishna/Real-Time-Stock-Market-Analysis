@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Shared remote Terraform state backend (S3 + DynamoDB lock table) for the
+  databricks/terraform/{credential,workspace} roots. Deliberately separate
+  from the 01-s3-datalake stack so that emptying/deleting the data bucket at
+  full project teardown never touches Terraform state. Creates no compute,
+  no IAM role trust, and no Databricks/Snowflake objects.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+    Description: Environment matching the other hybrid stacks
+  ProjectName:
+    Type: String
+    Default: stock-market-pipeline
+    AllowedPattern: '^[a-z][a-z0-9-]{0,29}$'
+    Description: Project name matching the other hybrid stacks
+
+Resources:
+  TerraformStateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectName}-tfstate-${Environment}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: terraform-state
+
+  TerraformStateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TerraformStateBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub '${TerraformStateBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  TerraformLockTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ProjectName}-tfstate-lock-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: LockID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: LockID
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: terraform-state
+
+Outputs:
+  TerraformStateBucketName:
+    Description: S3 bucket holding remote Terraform state for the Databricks platform roots
+    Value: !Ref TerraformStateBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-TerraformStateBucketName'
+  TerraformLockTableName:
+    Description: DynamoDB table used for Terraform state locking
+    Value: !Ref TerraformLockTable
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-TerraformLockTableName'

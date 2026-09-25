@@ -55,28 +55,60 @@ and safety tests, not implicitly during deployment.
 
 ## State and Authentication
 
-The roots default to local Terraform state for a single-operator bootstrap. Local
-state is not automatically encrypted: keep it on an access-controlled encrypted
-disk with secure backups and only one operator. For CI/team use, configure a
-reviewed encrypted remote backend with locking first. Do not store state in the
-data bucket that full project teardown will empty; preserve it until cleanup is
-complete. State loss breaks reliable updates and deletion.
+Both roots use a **remote S3 backend** (`backend "s3" {}` in each `main.tf`),
+not local state. This is required, not a preference: the `credential` root is
+applied twice (bootstrap, then again after CloudFormation trust activation)
+and must remember the storage credential it already created between those
+applies — a disposable CI runner's local disk can't provide that. The backend
+bucket and DynamoDB lock table are created by
+[cloudformation/00-terraform-state.yaml](../../cloudformation/00-terraform-state.yaml),
+deliberately separate from the `01-s3-datalake` data bucket so that emptying
+the data bucket at full teardown never touches Terraform state. Backend values
+(bucket/region/table) are supplied at `terraform init` time via
+`-backend-config`, since the bucket name includes the AWS account ID and isn't
+known when these files are authored. `-backend=false` (used for offline
+`terraform validate`/`terraform test`, see below) skips the backend entirely
+and is unaffected.
+
+The full bootstrap-through-workspace-objects sequence is automated end to end
+by [deploy-databricks-platform.yaml](../../.github/workflows/deploy-databricks-platform.yaml)
+(and reversed by `teardown-databricks-platform.yaml`): CloudFormation stack 06's
+role ARN and the credential root's generated principal/external-ID are passed
+between jobs as GitHub Actions outputs, not copied by hand. Run it from the
+Actions tab; it needs repository secrets `AWS_DEPLOY_ROLE_ARN` (already used by
+the other AWS workflows), `DATABRICKS_HOST`, and `DATABRICKS_TOKEN` (a personal
+access token — sufficient for a solo Free Edition workspace; see the account-
+console note above for why an OAuth service principal isn't needed here). For a
+human-approval gate before each apply, add required reviewers to the GitHub
+Environment named by the workflow's `environment` input, in repo Settings ->
+Environments — the same mechanism this repo already uses for the AWS-only
+workflows, applied here to every job that runs `terraform apply`/`destroy`.
 
 Use Databricks unified authentication via a securely configured CLI profile or
-supported workload identity/OAuth environment variables. Do not pass secrets in
-Terraform variables, source files, command history, or chat. `workspace_host`
-must be the workspace URL, not `accounts.cloud.databricks.com`.
+supported workload identity/OAuth environment variables when running these
+roots outside that workflow (e.g. `terraform plan` locally against the same
+remote state to review a change before triggering the workflow). Do not pass
+secrets in Terraform variables, source files, command history, or chat.
+`workspace_host` must be the workspace URL, not `accounts.cloud.databricks.com`.
 
 Supply non-secret values through `TF_VAR_<name>` or ignored `*.tfvars`. Treat saved
 plans and state as sensitive even when this module creates no client secrets.
 Commit `.terraform.lock.hcl`, not `.terraform/`, state, plans, crash logs, or tfvars.
-No remote backend is accessed by the local validation commands below.
+The offline validation commands below use `-backend=false` and never touch the
+remote backend or real credentials.
 
 ## Bootstrap Sequence
 
+**This entire sequence is automated by
+[deploy-databricks-platform.yaml](../../.github/workflows/deploy-databricks-platform.yaml)**
+(steps 1-5 below map to its `bootstrap` / `credential-bootstrap` /
+`activate-trust` / `credential-validate` / `workspace-objects` jobs). Run the
+workflow rather than these steps by hand; they're kept here as the reference
+description of what each stage actually does, for review and troubleshooting.
+
 All apply/deploy steps below need explicit authorization and reviewed change sets
-or Terraform plans. They were **not executed**. Use the same AWS project/environment
-and same Databricks workspace throughout; the current bundle/policy is dev-only.
+or Terraform plans. Use the same AWS project/environment and same Databricks
+workspace throughout; the current bundle/policy is dev-only.
 
 1. Deploy/update only the S3 and hybrid-access stacks (`01`, `05`) after reviewing
    existing data/lifecycle policies. Deploy `06` with
