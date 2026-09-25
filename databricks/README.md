@@ -7,17 +7,31 @@ workspace**. Local Kafka/raw capture and the legacy silver consumer are unchange
 This slice requires a workspace with Unity Catalog and external S3 access; it
 runs on **serverless compute**, not a classic job cluster.
 
-Databricks Free Edition has been verified capable of the storage half of this
-slice: a Unity Catalog storage credential and external location were created
-manually in the workspace UI against a personally owned S3 bucket, "Test
-Connection" passed all checks (Read/List/Write/Delete/Path Exists/Assume Role/
-Self-Assume Role/External ID Condition), and a serverless notebook successfully
-wrote and read back a real Delta table through that external location. Free
-Edition has **no classic compute at all**, which is why this bundle targets
-serverless; it also has no account console/account-level API access, which
-affects only the account-level Service Principal User step below, not the
-storage or compute path. The full Auto Loader job (this bundle, deployed and
-run) has not yet been exercised against a real workspace.
+Databricks Free Edition has been verified capable of every part of this
+slice's platform bootstrap through a real run (2026-09-25): the storage
+credential, all six external locations, the catalog/schemas, and the runtime
+service principal + its Unity Catalog grants applied cleanly against the real
+project bucket. Free Edition has **no classic compute at all**, which is why
+this bundle targets serverless.
+
+The bundle does **not** set `run_as: service_principal_name`, even though
+`workspace/main.tf` provisions a least-privilege `runtime` service principal
+with exactly that intent. Doing so needs the deploying identity to hold the
+"Service Principal User" role on that principal, which this provider version
+(1.88.0) only exposes through `databricks_access_control_rule_set`, an
+account-level rule-set resource (`name = "accounts/<id>/servicePrincipals/..."`)
+— and it's unverified whether that account-level API path is reachable from a
+workspace-scoped provider/token on Free Edition. Rather than guess at that a
+third time, the job currently runs as the deploying admin directly (the
+default when `run_as` is omitted). The `runtime` principal and its grants stay
+provisioned, unused for now, ready for whoever revisits this — worth retrying
+if the workspace is ever upgraded to one with account-console access, where
+the account-level rule-set resource is known to work.
+
+`databricks bundle validate` has been run once against a live workspace and
+passed, including the serverless `environment_key`/`environments` syntax.
+`bundle deploy`/`bundle run` (the actual Auto Loader job) have not yet
+completed successfully — that's the next concrete step.
 
 ```text
 landing/ticks/**/*.json.gz

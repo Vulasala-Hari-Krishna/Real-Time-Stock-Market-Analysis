@@ -99,6 +99,13 @@ locals {
   })
 }
 
+# Least-privilege identity holding this slice's Unity Catalog grants. The
+# bundle does not currently set `run_as` to this principal (see the note in
+# databricks/databricks.yml): doing so needs its "Service Principal User"
+# role granted to the deploying identity, which this provider version only
+# exposes through an account-level rule-set resource of unverified
+# workspace-token compatibility. The job runs as the deploying admin instead;
+# this principal/grants stay provisioned for when that's revisited.
 resource "databricks_service_principal" "runtime" {
   display_name               = "${local.name}_ticks_runtime"
   active                     = true

@@ -1,0 +1,113 @@
+name: Export Gold Snapshot
+
+# Publishes an immutable Parquet + manifest snapshot of one gold Delta table
+# (src/export/gold_snapshot.py), per the Gold Snapshot Contract v1 in
+# docs/hybrid-migration.md. Unlike the Databricks workflows, this needs no
+# Databricks CLI or Terraform - it reads the gold table directly via the
+# deltalake package over S3, so it only needs AWS credentials.
+#
+# Prerequisites: deploy-databricks-platform.yaml and deploy-databricks-job.yaml
+# have already run successfully in the same environment/region, so the gold
+# table this reads actually has data. Needs repo secret AWS_DEPLOY_ROLE_ARN
+# (already used by the other AWS workflows).
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      aws-region:
+        description: 'AWS region (must match the Databricks platform deploy)'
+        required: true
+        default: 'us-east-2'
+        type: string
+      catalog:
+        description: 'Unity Catalog catalog name'
+        required: true
+        default: 'stock_market_dev'
+        type: string
+      schema_prefix:
+        description: 'Schema prefix'
+        required: true
+        default: 'stocks'
+        type: string
+      dataset:
+        description: 'Registered dataset name to export (see DATASET_BUSINESS_KEYS)'
+        required: true
+        default: 'daily_quote_summary'
+        type: string
+      batch_id:
+        description: 'Explicit batch ID (leave blank to auto-generate one)'
+        required: false
+        default: ''
+        type: string
+      allow_empty:
+        description: 'Allow publishing a zero-row snapshot'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  export:
+    name: Export Gold Snapshot
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Read project data-lake bucket name (requires stack 01 already deployed)
+        id: databucket
+        run: |
+          NAME=$(aws cloudformation list-exports --region "${{ inputs.aws-region }}" \
+            --query "Exports[?Name=='stock-market-pipeline-${{ inputs.environment }}-DataLakeBucketName'].Value" \
+            --output text)
+          if [ -z "${NAME}" ]; then
+            echo "ERROR: stack 01 (S3 datalake) export not found in ${{ inputs.aws-region }}." >&2
+            exit 1
+          fi
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Run gold snapshot exporter
+        env:
+          BUCKET: ${{ steps.databucket.outputs.name }}
+          BATCH_ID: ${{ inputs.batch_id }}
+          ALLOW_EMPTY: ${{ inputs.allow_empty }}
+        run: |
+          ARGS=(
+            --catalog "${{ inputs.catalog }}"
+            --schema-prefix "${{ inputs.schema_prefix }}"
+            --bucket "${BUCKET}"
+            --dataset "${{ inputs.dataset }}"
+            --run-id "${{ github.run_id }}"
+          )
+          if [ -n "${BATCH_ID}" ]; then
+            ARGS+=(--batch-id "${BATCH_ID}")
+          fi
+          if [ "${ALLOW_EMPTY}" = "true" ]; then
+            ARGS+=(--allow-empty)
+          fi
+          python -m src.export.gold_snapshot "${ARGS[@]}"

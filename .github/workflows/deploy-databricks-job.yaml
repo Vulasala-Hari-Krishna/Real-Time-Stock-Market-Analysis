@@ -97,7 +97,6 @@ jobs:
       BUNDLE_VAR_catalog: ${{ needs.read-platform-state.outputs.catalog }}
       BUNDLE_VAR_schema_prefix: ${{ needs.read-platform-state.outputs.schema_prefix }}
       BUNDLE_VAR_bucket: ${{ needs.read-platform-state.outputs.bucket }}
-      BUNDLE_VAR_run_as_service_principal: ${{ needs.read-platform-state.outputs.run_as_service_principal }}
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
     steps:
@@ -113,27 +112,31 @@ jobs:
 
       - name: Generate and upload a small fixture tick file
         run: |
+          # Fixed source_id/timestamp/S3 key on every run, deliberately - NOT
+          # tied to GITHUB_RUN_ID. Auto Loader tracks already-seen files by
+          # path in its checkpoint, so re-uploading the same path each run
+          # means later runs correctly find nothing new to ingest, exercising
+          # rebuild_outputs' no-op/replay skip instead of piling up one more
+          # distinct accepted quote per workflow run.
           python3 - <<'PY'
-          import base64, gzip, json, os
-          from datetime import datetime, timezone
+          import base64, gzip, json
 
-          run_id = os.environ["GITHUB_RUN_ID"]
-          now = datetime.now(timezone.utc).isoformat()
+          FIXED_TIMESTAMP = "2026-01-01T00:00:00+00:00"
           payload = {
               "symbol": "AAPL",
               "price": 150.25,
               "volume": 1000,
-              "timestamp": now,
+              "timestamp": FIXED_TIMESTAMP,
               "source": "ci_fixture",
           }
           envelope = {
               "schema_version": 1,
-              "source_id": f"ci-fixture-{run_id}",
+              "source_id": "ci-fixture-v1",
               "topic": "raw_stock_ticks",
               "partition": 0,
               "offset": 1,
               "kafka_timestamp": None,
-              "ingested_at": now,
+              "ingested_at": FIXED_TIMESTAMP,
               "key_base64": None,
               "value_base64": base64.b64encode(json.dumps(payload).encode()).decode(),
               "headers": [],
@@ -142,7 +145,7 @@ jobs:
               f.write(json.dumps(envelope) + "\n")
           PY
           aws s3 cp /tmp/ci-fixture.json.gz \
-            "s3://${BUNDLE_VAR_bucket}/landing/ticks/ci-fixture/${GITHUB_RUN_ID}.json.gz" \
+            "s3://${BUNDLE_VAR_bucket}/landing/ticks/ci-fixture/fixture-v1.json.gz" \
             --region "${{ inputs.aws-region }}"
 
       - name: databricks bundle validate

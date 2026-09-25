@@ -41,13 +41,26 @@ and safety tests, not implicitly during deployment.
   sufficient workspace/Unity Catalog administration privileges to create credentials,
   locations/catalogs/schemas, a service principal, policy, and grants. Routine jobs
   use only the newly created non-admin runtime service principal.
-- On a workspace with account-console access, an authorized account administrator
-  must separately grant the deploying identity the Service Principal User role for
-  the generated runtime principal so deployment can set `run_as`. Free Edition has
-  **no account console/account-level API access at all**, so this step does not
-  apply there; a Free Edition admin deploys the bundle as themselves (workspace
-  PAT/OAuth), with the job still executing as the least-privilege runtime
-  principal via `run_as`. Re-check this if the workspace is later upgraded.
+- **Correction (verified live 2026-09-25):** deploying a job with `run_as:
+  service_principal_name` requires the deploying identity to hold the
+  "Service Principal User" role on that exact service principal, or
+  `databricks bundle deploy` fails with a 403 `PERMISSION_DENIED` even for a
+  workspace admin — admin status alone does not grant it. Provider 1.88.0
+  only exposes granting that role through `databricks_access_control_rule_set`,
+  an **account-level** rule-set resource (`name =
+  "accounts/<account_id>/servicePrincipals/<app_id>/ruleSets/default"`) — and
+  it's unverified whether that account-level API path is reachable from a
+  workspace-scoped provider/token on Free Edition (an attempted `databricks_permissions`-based
+  workaround failed: that resource has no `service_principal_id` argument in
+  this provider version). This repo does not currently attempt either
+  approach: the bundle omits `run_as` and the job runs as the deploying admin
+  instead (see `databricks/databricks.yml`). The `runtime` service principal
+  and its Unity Catalog grants below are still created and still
+  least-privilege-scoped, just not wired up as the job's execution identity
+  yet. An earlier version of this doc incorrectly claimed this step could
+  simply be skipped on Free Edition (it can't be skipped, it just isn't
+  attempted here) and, briefly, that it had been automated via
+  `databricks_permissions` (that argument doesn't exist in this provider).
 - Review inherited group entitlements: explicit false flags do not negate inherited
   cluster-create/admin access. Verify the runtime principal cannot bypass its grants.
 - Establish state storage/locking and an explicit spending/deployment window.
@@ -146,10 +159,12 @@ workspace throughout; the current bundle/policy is dev-only.
    The underlying role policy is broader for future publishing, but is not exposed
    as an instance profile. UC grants enforce this job's narrower use.
 7. Transfer the non-secret `bundle_variables` output to corresponding
-   `BUNDLE_VAR_<name>` values and use the [job guide](../README.md). Complete the
-   account-level Service Principal User assignment, restrict the bundle deployment
-   directory, and confirm the runtime can read the installed wheel. Run bundle
-   validation before an explicitly authorized deployment and small billable run.
+   `BUNDLE_VAR_<name>` values and use the [job guide](../README.md). The bundle
+   does not set `run_as` to the runtime principal (see the "Correction" note
+   above); no Service Principal User grant is attempted. Restrict the bundle
+   deployment directory and confirm the runtime can read the installed wheel.
+   Run bundle validation before an explicitly authorized
+   deployment and small billable run.
 
 For either Terraform root, use a reviewed saved plan, not auto-approve:
 
@@ -222,9 +237,8 @@ confirmation, perform this dependency order with the privileged setup identity:
    removal; drop external table metadata does not delete its S3 data.
 3. Review `terraform plan -destroy` in `workspace/` and apply that reviewed plan.
    Nonempty catalogs/schemas or dependent locations must fail, not force-cascade.
-   Remove the externally assigned account-level Service Principal User binding
-   and verify whether the runtime principal still exists at the account level;
-   delete that dedicated account identity separately if it was left behind.
+   This also removes the runtime service principal itself, a Terraform-managed
+   resource in this root, not an externally assigned binding.
 4. Destroy `credential/` after all its external locations are removed. Delete stack
    `06`, then `05`, before the S3 stack because of exported-policy/bucket imports.
    Do not delete IAM access while dependent cleanup still needs it.

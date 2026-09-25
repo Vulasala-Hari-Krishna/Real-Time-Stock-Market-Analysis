@@ -180,7 +180,6 @@ def test_publication_state_is_completed_only_after_validated_outputs(
         config.max_input_rows + 1 if failure == "row_limit" else 3
     )
     classified = MagicMock()
-    classified.cache.return_value = classified
     classified.groupBy.return_value.count.return_value.collect.return_value = [
         {"record_status": "accepted", "count": 1},
         {"record_status": "duplicate", "count": 1},
@@ -219,8 +218,8 @@ def test_publication_state_is_completed_only_after_validated_outputs(
             ]
         states = [call.args[0][0][0] for call in spark.createDataFrame.call_args_list]
         assert states == (["processing"] if failure else ["processing", "completed"])
-    if failure != "row_limit":
-        classified.unpersist.assert_called_once()
+    classified.cache.assert_not_called()
+    classified.unpersist.assert_not_called()
     spark.read.option.assert_called_once_with("versionAsOf", 2)
 
 
@@ -300,12 +299,14 @@ def test_bundle_is_manual_bounded_and_uses_explicit_platform_inputs() -> None:
     environments = {env["environment_key"]: env for env in deployed["environments"]}
     assert environment_key in environments
     assert environments[environment_key]["spec"]["dependencies"]
-    for name in (
-        "catalog",
-        "bucket",
-        "run_as_service_principal",
-    ):
+    for name in ("catalog", "bucket"):
         assert "default" not in bundle["variables"][name]
+    # No run_as: the job runs as the deploying admin. Setting run_as to the
+    # least-privilege runtime service principal needs a "Service Principal
+    # User" grant this provider version can't reliably automate on Free
+    # Edition (see databricks/terraform/README.md).
+    assert "run_as" not in bundle
+    assert "run_as_service_principal" not in bundle["variables"]
     package = tomllib.loads((root / "databricks/pyproject.toml").read_text())
     assert (
         package["project"]["scripts"]["landed_ticks"]
