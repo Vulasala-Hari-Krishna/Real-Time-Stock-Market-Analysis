@@ -6,6 +6,18 @@ terraform {
       version = "1.88.0"
     }
   }
+
+  # Remote state is required: this root is applied twice (bootstrap, then
+  # again after CloudFormation trust activation) and must remember the
+  # storage credential it already created between those applies. Backend
+  # values (bucket/table/region) are supplied at `terraform init` time via
+  # `-backend-config`, since they include the AWS account ID and are not
+  # known when this file is authored. `-backend=false` (used for offline
+  # `terraform validate`/`terraform test`) skips this block entirely.
+  backend "s3" {
+    key     = "credential/terraform.tfstate"
+    encrypt = true
+  }
 }
 
 variable "workspace_host" {

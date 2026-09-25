@@ -1,0 +1,285 @@
+name: Deploy Databricks Platform
+
+# Fully automated bootstrap of the Databricks Unity Catalog platform objects:
+# CloudFormation stacks 00 (Terraform state backend), 05 (hybrid access
+# policies) and 06 (Unity Catalog storage role), then both Terraform roots
+# (databricks/terraform/credential, databricks/terraform/workspace). No
+# manual value copy-pasting between steps: the IAM role ARN and the
+# Databricks-generated principal/external-ID are passed automatically via
+# job outputs, and Terraform state lives in the S3 backend created by stack
+# 00 so re-runs and later stages pick up exactly where the last run left off.
+#
+# Prerequisites (one-time):
+#   - Stack 01 (S3 datalake) already deployed in the same region via the
+#     "Deploy Infrastructure" workflow.
+#   - Repository secrets: AWS_DEPLOY_ROLE_ARN (already used by the other AWS
+#     workflows), DATABRICKS_HOST (workspace URL), DATABRICKS_TOKEN (a
+#     personal access token).
+#   - For a human-approval gate before each apply (matching this repo's
+#     "reviewed plan, not auto-approve" philosophy), add required reviewers
+#     to the GitHub Environment named by `environment` in repo Settings ->
+#     Environments. That gate then applies to every job below.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      aws-region:
+        description: 'AWS region (must match your Databricks workspace region)'
+        required: true
+        default: 'us-east-2'
+        type: string
+      catalog:
+        description: 'Unity Catalog catalog name for this slice'
+        required: true
+        default: 'stock_market_dev'
+        type: string
+      schema_prefix:
+        description: 'Schema prefix (creates <prefix>_bronze/_silver/_gold)'
+        required: true
+        default: 'stocks'
+        type: string
+      credential_name:
+        description: 'Unity Catalog storage credential name'
+        required: true
+        default: 'stock_market_dev_ticks'
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Bootstrap State Backend + IAM Role (00, 05, 06)
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      state_bucket: ${{ steps.state.outputs.bucket }}
+      lock_table: ${{ steps.state.outputs.table }}
+      storage_role_arn: ${{ steps.role.outputs.arn }}
+      data_bucket: ${{ steps.databucket.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Deploy Terraform state backend (stack 00)
+        run: |
+          aws cloudformation deploy \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --template-file cloudformation/00-terraform-state.yaml \
+            --parameter-overrides "Environment=${{ inputs.environment }}" "ProjectName=stock-market-pipeline" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region "${{ inputs.aws-region }}" \
+            --no-fail-on-empty-changeset
+
+      - name: Read state backend outputs
+        id: state
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformStateBucketName'].OutputValue" --output text)
+          TABLE=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformLockTableName'].OutputValue" --output text)
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "table=${TABLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy hybrid-access + storage-role stacks (05, 06), trust disabled
+        env:
+          ENABLE_UC_TRUST: "false"
+        run: |
+          chmod +x cloudformation/deploy-hybrid.sh
+          ./cloudformation/deploy-hybrid.sh "${{ inputs.environment }}"
+
+      - name: Read storage role ARN
+        id: role
+        run: |
+          ARN=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-06-databricks-storage-role-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='DatabricksStorageRoleArn'].OutputValue" --output text)
+          echo "arn=${ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Read project data-lake bucket name (requires stack 01 already deployed)
+        id: databucket
+        run: |
+          NAME=$(aws cloudformation list-exports --region "${{ inputs.aws-region }}" \
+            --query "Exports[?Name=='stock-market-pipeline-${{ inputs.environment }}-DataLakeBucketName'].Value" \
+            --output text)
+          if [ -z "${NAME}" ]; then
+            echo "ERROR: stack 01 (S3 datalake) export not found in ${{ inputs.aws-region }}." >&2
+            echo "Run the 'Deploy Infrastructure' workflow for this region first." >&2
+            exit 1
+          fi
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+
+  credential-bootstrap:
+    name: 'Terraform: credential root (bootstrap)'
+    runs-on: ubuntu-latest
+    needs: bootstrap
+    environment: ${{ inputs.environment }}
+    outputs:
+      principal_arn: ${{ steps.outputs.outputs.principal_arn }}
+      external_id: ${{ steps.outputs.outputs.external_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state)
+        working-directory: databricks/terraform/credential
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ needs.bootstrap.outputs.state_bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ needs.bootstrap.outputs.lock_table }}"
+
+      - name: Terraform apply (skip_validation; deny-all trust still in effect)
+        working-directory: databricks/terraform/credential
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="workspace_host=${{ secrets.DATABRICKS_HOST }}" \
+            -var="credential_name=${{ inputs.credential_name }}" \
+            -var="storage_role_arn=${{ needs.bootstrap.outputs.storage_role_arn }}" \
+            -var="validate_storage_access=false"
+
+      - name: Capture generated IAM trust values
+        id: outputs
+        working-directory: databricks/terraform/credential
+        run: |
+          echo "principal_arn=$(terraform output -raw unity_catalog_principal_arn)" >> "$GITHUB_OUTPUT"
+          echo "external_id=$(terraform output -raw unity_catalog_external_id)" >> "$GITHUB_OUTPUT"
+
+  activate-trust:
+    name: Activate Unity Catalog IAM Trust (06, second phase)
+    runs-on: ubuntu-latest
+    needs: [bootstrap, credential-bootstrap]
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Re-deploy hybrid stacks with the real generated trust values
+        env:
+          ENABLE_UC_TRUST: "true"
+          UC_PRINCIPAL_ARN: ${{ needs.credential-bootstrap.outputs.principal_arn }}
+          UC_EXTERNAL_ID: ${{ needs.credential-bootstrap.outputs.external_id }}
+        run: |
+          chmod +x cloudformation/deploy-hybrid.sh
+          ./cloudformation/deploy-hybrid.sh "${{ inputs.environment }}"
+
+  credential-validate:
+    name: 'Terraform: credential root (validate storage access)'
+    runs-on: ubuntu-latest
+    needs: [bootstrap, activate-trust]
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state)
+        working-directory: databricks/terraform/credential
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ needs.bootstrap.outputs.state_bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ needs.bootstrap.outputs.lock_table }}"
+
+      - name: Terraform apply (validate_storage_access=true)
+        working-directory: databricks/terraform/credential
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="workspace_host=${{ secrets.DATABRICKS_HOST }}" \
+            -var="credential_name=${{ inputs.credential_name }}" \
+            -var="storage_role_arn=${{ needs.bootstrap.outputs.storage_role_arn }}" \
+            -var="validate_storage_access=true"
+
+  workspace-objects:
+    name: 'Terraform: workspace root (catalog/schemas/external locations)'
+    runs-on: ubuntu-latest
+    needs: [bootstrap, credential-validate]
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state)
+        working-directory: databricks/terraform/workspace
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ needs.bootstrap.outputs.state_bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ needs.bootstrap.outputs.lock_table }}"
+
+      - name: Terraform apply
+        working-directory: databricks/terraform/workspace
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="workspace_host=${{ secrets.DATABRICKS_HOST }}" \
+            -var="catalog=${{ inputs.catalog }}" \
+            -var="schema_prefix=${{ inputs.schema_prefix }}" \
+            -var="bucket=${{ needs.bootstrap.outputs.data_bucket }}" \
+            -var="credential_name=${{ inputs.credential_name }}" \
+            -var="trust_activation_confirmed=true"
+
+      - name: Print bundle variables for the next stage (Databricks job deployment)
+        working-directory: databricks/terraform/workspace
+        run: terraform output -json bundle_variables

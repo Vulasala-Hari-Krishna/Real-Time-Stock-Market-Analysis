@@ -6,6 +6,14 @@ terraform {
       version = "1.88.0"
     }
   }
+
+  # Remote state (see credential/main.tf for why): keeps this root's created
+  # objects (catalog/schemas/external locations/service principal) durable
+  # across separate CI runs instead of a disposable runner's local disk.
+  backend "s3" {
+    key     = "workspace/terraform.tfstate"
+    encrypt = true
+  }
 }
 
 variable "workspace_host" {

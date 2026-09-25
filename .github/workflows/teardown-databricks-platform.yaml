@@ -1,0 +1,225 @@
+name: Teardown Databricks Platform
+
+# Reverse of deploy-databricks-platform.yaml: destroys the workspace
+# Terraform root, then the credential root, then CloudFormation stacks 06
+# and 05. Requires the SAME catalog/schema_prefix/credential_name inputs
+# used at deploy time, because Terraform must recompute the same resource
+# addresses to know what to destroy.
+#
+# Deliberately does NOT touch stack 00 (the Terraform state bucket/lock
+# table): that resource is what this very pipeline depends on, and it uses
+# DeletionPolicy: Retain in the template. Delete it manually (empty the S3
+# bucket, delete the bucket, delete the DynamoDB table) only after
+# confirming both Terraform roots destroyed cleanly.
+#
+# The workspace-objects destroy will FAIL if the catalog/schemas still
+# contain tables (force_destroy=false, by design) - drop the five
+# runtime-owned Unity Catalog tables in Databricks first if the job has
+# ever actually run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (only dev allowed)'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+      confirmation:
+        description: 'Type DESTROY to confirm teardown'
+        required: true
+        type: string
+      aws-region:
+        description: 'AWS region (must match the deploy run)'
+        required: true
+        default: 'us-east-2'
+        type: string
+      catalog:
+        description: 'Same catalog name used at deploy time'
+        required: true
+        default: 'stock_market_dev'
+        type: string
+      schema_prefix:
+        description: 'Same schema prefix used at deploy time'
+        required: true
+        default: 'stocks'
+        type: string
+      credential_name:
+        description: 'Same credential name used at deploy time'
+        required: true
+        default: 'stock_market_dev_ticks'
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Confirmation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ inputs.confirmation }}" != "DESTROY" ]; then
+            echo "ERROR: You must type DESTROY to confirm teardown."
+            exit 1
+          fi
+          if [ "${{ inputs.environment }}" != "dev" ]; then
+            echo "ERROR: Teardown via workflow is only allowed for the dev environment."
+            exit 1
+          fi
+
+  read-state-backend:
+    name: Read State Backend + Role ARN
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: ${{ inputs.environment }}
+    outputs:
+      state_bucket: ${{ steps.state.outputs.bucket }}
+      lock_table: ${{ steps.state.outputs.table }}
+      storage_role_arn: ${{ steps.role.outputs.arn }}
+      data_bucket: ${{ steps.databucket.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Read Terraform state backend outputs (stack 00 must already exist)
+        id: state
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformStateBucketName'].OutputValue" --output text)
+          TABLE=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformLockTableName'].OutputValue" --output text)
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "table=${TABLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Read storage role ARN (stack 06 must still exist)
+        id: role
+        run: |
+          ARN=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-06-databricks-storage-role-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='DatabricksStorageRoleArn'].OutputValue" --output text)
+          echo "arn=${ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Read project data-lake bucket name
+        id: databucket
+        run: |
+          NAME=$(aws cloudformation list-exports --region "${{ inputs.aws-region }}" \
+            --query "Exports[?Name=='stock-market-pipeline-${{ inputs.environment }}-DataLakeBucketName'].Value" \
+            --output text)
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+
+  destroy-workspace-objects:
+    name: 'Terraform: destroy workspace root'
+    runs-on: ubuntu-latest
+    needs: read-state-backend
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state)
+        working-directory: databricks/terraform/workspace
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ needs.read-state-backend.outputs.state_bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ needs.read-state-backend.outputs.lock_table }}"
+
+      - name: Terraform destroy
+        working-directory: databricks/terraform/workspace
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          terraform destroy -input=false -auto-approve \
+            -var="workspace_host=${{ secrets.DATABRICKS_HOST }}" \
+            -var="catalog=${{ inputs.catalog }}" \
+            -var="schema_prefix=${{ inputs.schema_prefix }}" \
+            -var="bucket=${{ needs.read-state-backend.outputs.data_bucket }}" \
+            -var="credential_name=${{ inputs.credential_name }}" \
+            -var="trust_activation_confirmed=true"
+
+  destroy-credential:
+    name: 'Terraform: destroy credential root'
+    runs-on: ubuntu-latest
+    needs: [read-state-backend, destroy-workspace-objects]
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state)
+        working-directory: databricks/terraform/credential
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ needs.read-state-backend.outputs.state_bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ needs.read-state-backend.outputs.lock_table }}"
+
+      - name: Terraform destroy
+        working-directory: databricks/terraform/credential
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          terraform destroy -input=false -auto-approve \
+            -var="workspace_host=${{ secrets.DATABRICKS_HOST }}" \
+            -var="credential_name=${{ inputs.credential_name }}" \
+            -var="storage_role_arn=${{ needs.read-state-backend.outputs.storage_role_arn }}"
+
+  teardown-hybrid-stacks:
+    name: Teardown Hybrid Stacks (06, 05)
+    runs-on: ubuntu-latest
+    needs: destroy-credential
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Teardown stacks 06 and 05
+        run: |
+          chmod +x cloudformation/teardown-hybrid.sh
+          echo "yes" | ./cloudformation/teardown-hybrid.sh "${{ inputs.environment }}"
+
+      - name: Reminder about the state backend
+        run: |
+          echo "Stacks 05/06 destroyed. Stack 00 (Terraform state bucket + lock table)"
+          echo "was NOT touched - it uses DeletionPolicy: Retain deliberately."
+          echo "Delete it manually (empty + delete the S3 bucket, delete the DynamoDB"
+          echo "table, then delete stack stock-market-pipeline-00-terraform-state-${{ inputs.environment }})"
+          echo "only after confirming both Terraform roots destroyed cleanly above."
