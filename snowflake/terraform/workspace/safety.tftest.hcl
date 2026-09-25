@@ -19,7 +19,7 @@ run "unconfirmed_trust_blocks_entire_apply" {
     trust_activation_confirmed = false
   }
   expect_failures = [
-    snowflake_stage.publish,
+    snowflake_stage_external_s3.publish,
   ]
 }
 
@@ -59,11 +59,11 @@ run "platform_boundaries" {
     error_message = "The loader role must receive USAGE only on the warehouse and database."
   }
   assert {
-    condition     = snowflake_stage.publish.url == "s3://offline-test-bucket/publish/"
+    condition     = snowflake_stage_external_s3.publish.url == "s3://offline-test-bucket/publish/"
     error_message = "The stage must point only at the publish/ prefix."
   }
   assert {
-    condition     = snowflake_stage.publish.storage_integration == var.integration_name
+    condition     = snowflake_stage_external_s3.publish.storage_integration == var.integration_name
     error_message = "The stage must reference the bootstrap root's storage integration."
   }
 }

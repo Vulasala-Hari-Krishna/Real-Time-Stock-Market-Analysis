@@ -175,7 +175,15 @@ resource "snowflake_grant_privileges_to_account_role" "schema_privileges" {
 # precondition blocks the ENTIRE apply, not just this resource - which is
 # exactly why the storage integration lives in the separate, ungated
 # bootstrap root instead of here.
-resource "snowflake_stage" "publish" {
+#
+# snowflake_stage (generic) is deprecated AND gated behind a
+# `preview_features_enabled` opt-in in provider 2.x (confirmed live
+# 2026-09-25: "snowflake_stage_resource is currently a preview feature").
+# snowflake_stage_external_s3 is the stable, non-preview AWS-specific
+# replacement the deprecation warning pointed to - same argument names
+# (name/database/schema/url/storage_integration/comment), confirmed against
+# the provider's own docs before switching, not guessed again.
+resource "snowflake_stage_external_s3" "publish" {
   name                = "${var.database_name}_PUBLISH_STAGE"
   database            = snowflake_database.ticks.name
   schema              = snowflake_schema.staging.name
@@ -191,15 +199,16 @@ resource "snowflake_stage" "publish" {
   }
 }
 
-# Unverified: the on_schema_object block shape (object_type/object_name for a
-# STAGE) is inferred from the confirmed on_account_object/on_schema patterns
-# above, not confirmed directly against the provider docs.
+# on_schema_object confirmed live 2026-09-25: this exact block planned
+# correctly (object_type = "STAGE", object_name known-after-apply) before
+# the stage itself failed on the preview-feature error above - only the
+# stage resource type needed fixing, not this grant.
 resource "snowflake_grant_privileges_to_account_role" "stage_usage" {
   account_role_name = snowflake_account_role.loader.name
   privileges        = ["USAGE"]
   on_schema_object {
     object_type = "STAGE"
-    object_name = snowflake_stage.publish.fully_qualified_name
+    object_name = snowflake_stage_external_s3.publish.fully_qualified_name
   }
 }
 
@@ -220,5 +229,5 @@ output "loader_role_name" {
 }
 
 output "stage_name" {
-  value = snowflake_stage.publish.fully_qualified_name
+  value = snowflake_stage_external_s3.publish.fully_qualified_name
 }

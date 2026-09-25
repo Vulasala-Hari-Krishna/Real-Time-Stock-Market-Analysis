@@ -2,8 +2,9 @@
 
 ## Status
 
-Two real live attempts (2026-09-25), both instructive, neither yet
-successful end to end - the second attempt's fix is unrun. Terraform CLI
+Three real live attempts (2026-09-25), each instructive, not yet fully
+successful - attempt 3's fix is unrun, but 8 of 10 `workspace` resources are
+already created and persisted in remote state from that attempt. Terraform CLI
 has not been available in the authoring environment this session, so
 `terraform fmt`/`validate`/`test` have not been run locally either; `cfn-lint`
 and YAML syntax checks have. This uses an existing Snowflake trial account
@@ -37,17 +38,23 @@ see "Architecture" below - the same structural pattern the Databricks
 `credential`/`workspace` split already used, now understood for the right
 reason.
 
-**Two things remain unverified against a real apply** (attempt 2 never
-reached actual resource creation, so this is still open), flagged inline
-where they occur:
-1. `snowflake_storage_integration_aws.ticks.describe_output[0].iam_user_arn`/
-   `external_id` (`bootstrap/main.tf`) - `describe_output` is documented as
-   a "List of Object"; `[0]` indexing is the expected access pattern but
-   untested live.
-2. The `workspace/main.tf` `stage_usage` grant's
-   `on_schema_object { object_type = "STAGE" ... }` block - inferred from
-   the confirmed `on_account_object`/`on_schema` block shapes on the other
-   grants, not confirmed directly for a stage object.
+**Attempt 3** (after the two-root split): the `bootstrap` root, `activate-trust`,
+and most of the `workspace` root all succeeded live - `describe_output[0]`
+indexing worked (the pipeline reached and passed through `activate-trust`,
+which depends on it), and 8 of 10 `workspace` resources were actually
+created (resource monitor, warehouse, loader role, 3 grants, database,
+schema) - real progress now persisted in state. The `on_schema_object`
+grant for the stage also planned correctly (`object_type = "STAGE"`,
+`object_name` known-after-apply) before the stage itself failed:
+**`snowflake_stage` is deprecated *and* gated behind a
+`preview_features_enabled` opt-in** ("snowflake_stage_resource is currently
+a preview feature"). Fixed by switching to `snowflake_stage_external_s3`,
+the stable AWS-specific replacement the deprecation warning itself pointed
+to - confirmed against the provider's own docs (same argument names:
+`name`/`database`/`schema`/`url`/`storage_integration`/`comment`) before
+switching, not guessed. Both previously-"unverified" schema points above
+are now confirmed correct; nothing remains unverified in this root's
+schema. **Not yet re-run** with this fix.
 
 ## Architecture
 
