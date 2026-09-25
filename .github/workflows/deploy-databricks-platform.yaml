@@ -131,6 +131,25 @@ jobs:
           fi
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
 
+      - name: Seed landing/ticks placeholder object
+        env:
+          DATA_BUCKET: ${{ steps.databucket.outputs.name }}
+        run: |
+          # Unity Catalog validates a read_only external location by listing
+          # real objects (it cannot use a write-then-delete probe like it
+          # does for writable locations). A brand-new bucket has zero objects
+          # under landing/ticks/ until the raw consumer has actually run, and
+          # an empty prefix makes that validation fail with a misleading
+          # "does not have LIST permissions" error. One harmless placeholder
+          # object avoids that; full teardown (which empties the bucket)
+          # removes it automatically.
+          touch /tmp/landing-ticks-placeholder
+          aws s3api put-object \
+            --bucket "${DATA_BUCKET}" \
+            --key "landing/ticks/.keep" \
+            --region "${{ inputs.aws-region }}" \
+            --body /tmp/landing-ticks-placeholder > /dev/null
+
   credential-bootstrap:
     name: 'Terraform: credential root (bootstrap)'
     runs-on: ubuntu-latest

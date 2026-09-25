@@ -26,7 +26,7 @@ def test_role_bootstraps_with_no_assumable_principal(template: dict) -> None:
         {
             "Sid": "BootstrapDenyAllAssumption",
             "Effect": "Deny",
-            "Principal": "*",
+            "Principal": {"AWS": "*"},
             "Action": "sts:AssumeRole",
         }
     ]

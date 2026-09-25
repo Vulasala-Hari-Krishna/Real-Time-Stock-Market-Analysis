@@ -79,7 +79,8 @@ Resources:
           Statement:
             - Sid: BootstrapDenyAllAssumption
               Effect: Deny
-              Principal: '*'
+              Principal:
+                AWS: '*'
               Action: sts:AssumeRole
       Policies:
         - PolicyName: SelfAssumeOnly
