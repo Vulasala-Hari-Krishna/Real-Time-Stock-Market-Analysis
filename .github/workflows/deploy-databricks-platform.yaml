@@ -143,11 +143,12 @@ jobs:
           # "does not have LIST permissions" error. One harmless placeholder
           # object avoids that; full teardown (which empties the bucket)
           # removes it automatically.
+          touch /tmp/landing-ticks-placeholder
           aws s3api put-object \
             --bucket "${DATA_BUCKET}" \
             --key "landing/ticks/.keep" \
             --region "${{ inputs.aws-region }}" \
-            --body /dev/null > /dev/null
+            --body /tmp/landing-ticks-placeholder > /dev/null
 
   credential-bootstrap:
     name: 'Terraform: credential root (bootstrap)'
