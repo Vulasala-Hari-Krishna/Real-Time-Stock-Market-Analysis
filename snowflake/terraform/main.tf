@@ -90,11 +90,34 @@ variable "trust_activation_confirmed" {
   description = "Set true only after activating exact IAM trust on the storage role stack."
 }
 
-# Account/user/private key come from SNOWFLAKE_ACCOUNT/SNOWFLAKE_USER/
-# SNOWFLAKE_PRIVATE_KEY env vars, matching how the Databricks provider reads
-# DATABRICKS_TOKEN - never pass credentials as Terraform variables.
+variable "organization_name" {
+  type        = string
+  description = "Organization segment of the Snowflake account identifier (before the hyphen, e.g. ILMRWBU in ILMRWBU-TX52777). Not a secret."
+  validation {
+    condition     = can(regex("^[A-Za-z][A-Za-z0-9]{0,63}$", var.organization_name))
+    error_message = "Provide the organization name segment of the account identifier."
+  }
+}
+
+variable "account_name" {
+  type        = string
+  description = "Account segment of the Snowflake account identifier (after the hyphen, e.g. TX52777 in ILMRWBU-TX52777). Not a secret."
+  validation {
+    condition     = can(regex("^[A-Za-z][A-Za-z0-9]{0,63}$", var.account_name))
+    error_message = "Provide the account name segment of the account identifier."
+  }
+}
+
+# User/private key come from SNOWFLAKE_USER/SNOWFLAKE_PRIVATE_KEY env vars,
+# matching how the Databricks provider reads DATABRICKS_TOKEN - never pass
+# credentials as Terraform variables. Provider 2.x does NOT read
+# SNOWFLAKE_ACCOUNT (confirmed live 2026-09-25: it emits "environment
+# variable is ignored" and requires the PROVIDER_CONFIGURATION_ACCOUNT_FALLBACK
+# experiment); organization_name/account_name must be set explicitly instead.
 provider "snowflake" {
-  authenticator = "SNOWFLAKE_JWT"
+  organization_name = var.organization_name
+  account_name       = var.account_name
+  authenticator      = "SNOWFLAKE_JWT"
 }
 
 resource "snowflake_resource_monitor" "ticks" {

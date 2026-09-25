@@ -2,21 +2,32 @@
 
 ## Status
 
-Prepared and offline-validated (`terraform fmt`/`terraform validate` only -
-Terraform CLI has not been available in the authoring environment this
-session; `terraform test` against the mock provider has not been run
-either). **No real plan/apply has been executed.** This root uses an
-existing Snowflake trial account (`ILMRWBU-TX52777`, AWS `ap-southeast-1`)
-with `ACCOUNTADMIN` access for the deploying identity - account/workspace
-creation is an explicit prerequisite, not provisioned here.
+Prepared and offline-validated (`cfn-lint`, YAML syntax) plus **one real
+first attempt (2026-09-25) that failed at provider configuration** - fixed,
+not yet re-run. Terraform CLI has not been available in the authoring
+environment this session, so `terraform fmt`/`validate`/`test` have not been
+run either. This root uses an existing Snowflake trial account
+(`ILMRWBU-TX52777`, AWS `ap-southeast-1`) with `ACCOUNTADMIN` access for the
+deploying identity - account/workspace creation is an explicit prerequisite,
+not provisioned here.
 
-**Two things in `main.tf` are unverified against a real apply**, flagged
-inline where they occur, in case the first real run needs a fix-iteration
-(the same category of issue as the Databricks `databricks_permissions`
-argument mistake earlier this migration):
+**Confirmed live** (from the failed first attempt, before it failed):
+`snowflake_warehouse`'s `resource_monitor` argument and
+`snowflake_account_role`/`snowflake_grant_privileges_to_account_role`'s
+`on_account_object`/`on_schema` blocks parsed and planned without
+complaint. Also confirmed by that same run: provider 2.x does **not** read
+`SNOWFLAKE_ACCOUNT` (see "State and Authentication" below) - this was the
+actual failure, now fixed with explicit `organization_name`/`account_name`
+variables.
+
+**Two things remain unverified against a real apply**, flagged inline where
+they occur, in case the next real run needs a fix-iteration (the same
+category of issue as the Databricks `databricks_permissions` argument
+mistake earlier this migration):
 1. `snowflake_storage_integration_aws.ticks.describe_output[0].iam_user_arn`/
    `external_id` - `describe_output` is documented as a "List of Object";
-   `[0]` indexing is the expected access pattern but untested live.
+   `[0]` indexing is the expected access pattern but untested live (the first
+   attempt never got this far).
 2. The `snowflake_grant_privileges_to_account_role.stage_usage` resource's
    `on_schema_object { object_type = "STAGE" ... }` block - inferred from the
    confirmed `on_account_object`/`on_schema` block shapes on the other grants
@@ -85,9 +96,16 @@ reason: the two-apply sequence needs state continuity that a disposable CI
 runner's local disk can't provide.
 
 Authentication is key-pair (JWT), not a password: the provider reads
-`SNOWFLAKE_ACCOUNT`/`SNOWFLAKE_USER`/`SNOWFLAKE_PRIVATE_KEY` from the
-environment (GitHub secrets in the workflow); `authenticator = "SNOWFLAKE_JWT"`
-is set explicitly in `main.tf`. Never pass the private key as a Terraform
+`SNOWFLAKE_USER`/`SNOWFLAKE_PRIVATE_KEY` from the environment (GitHub secrets
+in the workflow); `authenticator = "SNOWFLAKE_JWT"` is set explicitly in
+`main.tf`. **`SNOWFLAKE_ACCOUNT` is not read by provider 2.x** (confirmed
+live 2026-09-25: it warns "environment variable is ignored" and requires an
+opt-in `PROVIDER_CONFIGURATION_ACCOUNT_FALLBACK` experiment) - `main.tf`
+takes explicit `organization_name`/`account_name` variables instead (the two
+halves of the account identifier, e.g. `ILMRWBU`/`TX52777` split from
+`ILMRWBU-TX52777`; not secrets). The workflow splits the existing
+`SNOWFLAKE_ACCOUNT` secret into these two at runtime rather than needing a
+new secret. Never pass the private key as a Terraform
 variable or commit it; `*.p8`/`*.pem`/`rsa_key*` are gitignored.
 
 ## Offline Validation

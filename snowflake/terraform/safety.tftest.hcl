@@ -8,6 +8,8 @@ variables {
   warehouse_name              = "PORTFOLIO_DEV_WH"
   loader_role_name           = "PORTFOLIO_DEV_LOADER"
   credit_quota               = 10
+  organization_name         = "ILMRWBU"
+  account_name               = "TX52777"
   trust_activation_confirmed = true
 }
 

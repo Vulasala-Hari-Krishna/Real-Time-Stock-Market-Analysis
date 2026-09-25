@@ -163,6 +163,19 @@ jobs:
         with:
           terraform_version: '1.9.8'
 
+      - name: Split SNOWFLAKE_ACCOUNT into organization_name/account_name
+        id: snowflake_account
+        run: |
+          # Provider 2.x does not read SNOWFLAKE_ACCOUNT (confirmed live: it
+          # warns "environment variable is ignored" and requires an opt-in
+          # experiment); organization_name/account_name must be passed
+          # explicitly instead. These aren't secrets - just split from the
+          # existing SNOWFLAKE_ACCOUNT secret so no new secret is needed.
+          ORG="${SNOWFLAKE_ACCOUNT%%-*}"
+          ACCT="${SNOWFLAKE_ACCOUNT#*-}"
+          echo "organization_name=${ORG}" >> "$GITHUB_OUTPUT"
+          echo "account_name=${ACCT}" >> "$GITHUB_OUTPUT"
+
       - name: Terraform init (remote state)
         working-directory: snowflake/terraform
         run: |
@@ -184,6 +197,8 @@ jobs:
             -var="warehouse_name=${{ inputs.warehouse_name }}" \
             -var="loader_role_name=${{ inputs.loader_role_name }}" \
             -var="credit_quota=${{ inputs.credit_quota }}" \
+            -var="organization_name=${{ steps.snowflake_account.outputs.organization_name }}" \
+            -var="account_name=${{ steps.snowflake_account.outputs.account_name }}" \
             -var="trust_activation_confirmed=false"
 
       - name: Capture generated IAM trust values
@@ -192,8 +207,14 @@ jobs:
         run: |
           echo ">>> Previous apply outcome: ${{ steps.apply.outcome }} (failure here is expected -"
           echo ">>> the stage's precondition blocks it deliberately until trust is activated)."
-          PRINCIPAL=$(terraform output -raw iam_principal_arn)
-          EXTERNAL=$(terraform output -raw external_id)
+          # -json + jq instead of `output -raw <name>`: a truly empty/failed
+          # state makes `-raw` print multi-line warning text to stdout,
+          # which corrupted $GITHUB_OUTPUT's key=value format on the first
+          # live run. This always yields a clean single-line string (or ""),
+          # whatever state actually contains.
+          OUTPUTS_JSON=$(terraform output -json 2>/dev/null || echo '{}')
+          PRINCIPAL=$(echo "${OUTPUTS_JSON}" | jq -r '.iam_principal_arn.value // ""')
+          EXTERNAL=$(echo "${OUTPUTS_JSON}" | jq -r '.external_id.value // ""')
           if [ -z "${PRINCIPAL}" ] || [ -z "${EXTERNAL}" ]; then
             echo "ERROR: storage integration outputs are empty - a resource other than" >&2
             echo "the gated stage failed. Check the apply log above before continuing." >&2
@@ -249,6 +270,14 @@ jobs:
         with:
           terraform_version: '1.9.8'
 
+      - name: Split SNOWFLAKE_ACCOUNT into organization_name/account_name
+        id: snowflake_account
+        run: |
+          ORG="${SNOWFLAKE_ACCOUNT%%-*}"
+          ACCT="${SNOWFLAKE_ACCOUNT#*-}"
+          echo "organization_name=${ORG}" >> "$GITHUB_OUTPUT"
+          echo "account_name=${ACCT}" >> "$GITHUB_OUTPUT"
+
       - name: Terraform init (remote state)
         working-directory: snowflake/terraform
         run: |
@@ -268,6 +297,8 @@ jobs:
             -var="warehouse_name=${{ inputs.warehouse_name }}" \
             -var="loader_role_name=${{ inputs.loader_role_name }}" \
             -var="credit_quota=${{ inputs.credit_quota }}" \
+            -var="organization_name=${{ steps.snowflake_account.outputs.organization_name }}" \
+            -var="account_name=${{ steps.snowflake_account.outputs.account_name }}" \
             -var="trust_activation_confirmed=true"
 
       - name: Print platform outputs
