@@ -1,0 +1,87 @@
+name: Deploy Hybrid Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      aws-region:
+        description: 'AWS region (must match your Databricks workspace region)'
+        required: true
+        default: 'us-east-2'
+        type: string
+      enable-unity-catalog-trust:
+        description: 'Second stage only: true after the credential Terraform root returns its outputs'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      unity-catalog-principal-arn:
+        description: 'Second stage only: unity_catalog_principal_arn from the credential Terraform root'
+        required: false
+        default: ''
+        type: string
+      unity-catalog-external-id:
+        description: 'Second stage only: unity_catalog_external_id from the credential Terraform root'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ github.event.inputs.aws-region || 'us-east-2' }}
+
+jobs:
+  validate:
+    name: Validate Templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+
+      - name: Lint hybrid CloudFormation templates
+        run: cfn-lint cloudformation/05-hybrid-access.yaml cloudformation/06-databricks-storage-role.yaml
+
+  deploy:
+    name: Deploy Hybrid Stacks (05, 06)
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Deploy stacks 05 and 06
+        env:
+          ENABLE_UC_TRUST: ${{ github.event.inputs.enable-unity-catalog-trust }}
+          UC_PRINCIPAL_ARN: ${{ github.event.inputs.unity-catalog-principal-arn }}
+          UC_EXTERNAL_ID: ${{ github.event.inputs.unity-catalog-external-id }}
+        run: |
+          chmod +x cloudformation/deploy-hybrid.sh
+          ./cloudformation/deploy-hybrid.sh "${{ github.event.inputs.environment || 'dev' }}"

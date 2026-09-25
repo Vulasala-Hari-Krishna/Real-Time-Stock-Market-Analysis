@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools==75.8.2", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-market-hybrid"
+version = "0.1.0"
+description = "Manual Databricks processing of consumer-landed quote samples"
+requires-python = ">=3.11"
+dependencies = ["pydantic==2.6.4"]
+
+[project.scripts]
+landed_ticks = "src.batch.databricks_ticks:main"
+
+[tool.setuptools]
+package-dir = {"" = ".."}
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["src", "src.*"]

@@ -1,4 +1,4 @@
-name: Teardown Infrastructure
+name: Teardown Hybrid Infrastructure
 
 on:
   workflow_dispatch:
@@ -25,11 +25,11 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: ${{ github.event.inputs.aws-region || vars.AWS_REGION || 'us-east-2' }}
+  AWS_REGION: ${{ github.event.inputs.aws-region || 'us-east-2' }}
 
 jobs:
   teardown:
-    name: Teardown CloudFormation Stacks
+    name: Teardown Hybrid Stacks (06, 05)
     runs-on: ubuntu-latest
     if: github.event.inputs.confirmation == 'DESTROY'
     environment: ${{ github.event.inputs.environment }}
@@ -53,10 +53,10 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Teardown all stacks
+      - name: Teardown hybrid stacks
         run: |
-          chmod +x cloudformation/teardown-all.sh
-          echo "yes" | ./cloudformation/teardown-all.sh "${{ github.event.inputs.environment }}"
+          chmod +x cloudformation/teardown-hybrid.sh
+          echo "yes" | ./cloudformation/teardown-hybrid.sh "${{ github.event.inputs.environment }}"
 
   rejected:
     name: Teardown Rejected

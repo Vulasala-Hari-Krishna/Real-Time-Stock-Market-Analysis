@@ -1,0 +1,66 @@
+bundle:
+  name: stock-market-hybrid
+
+variables:
+  catalog:
+    description: Existing Unity Catalog catalog for this isolated slice
+  schema_prefix:
+    description: Existing schema prefix with _bronze, _silver, and _gold schemas
+    default: stocks
+  bucket:
+    description: Existing S3 bucket with governed landing/lakehouse/checkpoint access
+  run_as_service_principal:
+    description: Application ID of the least-privilege workspace service principal
+
+run_as:
+  service_principal_name: ${var.run_as_service_principal}
+
+artifacts:
+  hybrid_wheel:
+    type: whl
+    path: .
+    build: python -m pip wheel --no-deps --wheel-dir dist .
+
+resources:
+  jobs:
+    landed_ticks:
+      name: stock-market-hybrid-${bundle.target}-landed-ticks
+      description: Manual AvailableNow ingestion and bounded sampled-quote snapshots (serverless compute)
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+      queue:
+        enabled: false
+      tasks:
+        - task_key: ingest_and_rebuild_quotes
+          environment_key: ticks_env
+          timeout_seconds: 1800
+          max_retries: 0
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: stock_market_hybrid
+            entry_point: landed_ticks
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema-prefix
+              - ${var.schema_prefix}
+              - --bucket
+              - ${var.bucket}
+      # Serverless jobs install dependencies through a job-level environment,
+      # not the classic-cluster `libraries:` task stanza. environment_version
+      # "4" is used deliberately: "2" has a documented wheel-loading bug.
+      # Unverified against a live workspace — run `databricks bundle validate
+      # -t dev` before deploying and adjust if the current CLI schema differs.
+      environments:
+        - environment_key: ticks_env
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ./dist/*.whl
+
+targets:
+  dev:
+    default: true
+    mode: production
+    workspace:
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}

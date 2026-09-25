@@ -81,6 +81,25 @@ jobs:
       - name: Validate templates
         run: cfn-lint cloudformation/*.yaml
 
+  databricks-platform:
+    name: Databricks IaC Offline Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate and test pinned Terraform roots without cloud access
+        run: |
+          for root in credential workspace; do
+            path="${GITHUB_WORKSPACE}/databricks/terraform/${root}"
+            docker run --rm --mount "type=bind,source=${path},target=/work" -w /work \
+              hashicorp/terraform:1.9.8 init -backend=false -input=false -lockfile=readonly
+            for check in "fmt -check" "validate" "test"; do
+              docker run --rm --network none \
+                --mount "type=bind,source=${path},target=/work" -w /work \
+                hashicorp/terraform:1.9.8 ${check}
+            done
+          done
+
   docker-build:
     name: Docker Build Verification
     runs-on: ubuntu-latest

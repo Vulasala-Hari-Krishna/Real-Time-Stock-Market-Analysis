@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Optional, unattached S3 access policies for hybrid local ingestion,
+  Databricks lakehouse processing, and Snowflake snapshot loading.
+  Requires the existing S3 stack; creates no identities or credentials.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+    Description: Deployment environment matching the S3 stack
+  ProjectName:
+    Type: String
+    Default: stock-market-pipeline
+    Description: Project name matching the S3 stack
+
+Resources:
+  LocalLandingPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-hybrid-local-landing-${Environment}'
+      Description: Read and write raw landing files without deleting source objects
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: BucketLocation
+            Effect: Allow
+            Action: s3:GetBucketLocation
+            Resource: !ImportValue
+              Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+          - Sid: ListLanding
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !ImportValue
+              Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - landing
+                  - landing/*
+          - Sid: LandingObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+            Resource: !Sub
+              - '${BucketArn}/landing/*'
+              - BucketArn: !ImportValue
+                  Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+
+  DatabricksStoragePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-hybrid-databricks-storage-${Environment}'
+      Description: Read landing and manage separate Delta, checkpoint, and export paths
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: BucketLocation
+            Effect: Allow
+            Action: s3:GetBucketLocation
+            Resource: !ImportValue
+              Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+          - Sid: ListHybridPaths
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !ImportValue
+              Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - landing
+                  - landing/*
+                  - lakehouse
+                  - lakehouse/*
+                  - checkpoints/hybrid
+                  - checkpoints/hybrid/*
+                  - publish
+                  - publish/*
+          - Sid: ReadLandingObjects
+            Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub
+              - '${BucketArn}/landing/*'
+              - BucketArn: !ImportValue
+                  Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+          - Sid: ManageLakehouseStateAndExports
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+            Resource:
+              - !Sub
+                - '${BucketArn}/lakehouse/*'
+                - BucketArn: !ImportValue
+                    Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+              - !Sub
+                - '${BucketArn}/checkpoints/hybrid/*'
+                - BucketArn: !ImportValue
+                    Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+              - !Sub
+                - '${BucketArn}/publish/*'
+                - BucketArn: !ImportValue
+                    Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+
+  SnowflakePublishPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-hybrid-snowflake-publish-${Environment}'
+      Description: Read only explicit published snapshots, not raw or Delta data
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: BucketLocation
+            Effect: Allow
+            Action: s3:GetBucketLocation
+            Resource: !ImportValue
+              Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+          - Sid: ListPublishedFiles
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !ImportValue
+              Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - publish
+                  - publish/*
+          - Sid: ReadPublishedObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub
+              - '${BucketArn}/publish/*'
+              - BucketArn: !ImportValue
+                  Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
+
+Outputs:
+  LocalLandingPolicyArn:
+    Description: Unattached policy for a dedicated local ingestion identity
+    Value: !Ref LocalLandingPolicy
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-LocalLandingPolicyArn'
+  DatabricksStoragePolicyArn:
+    Description: Unattached policy; Unity Catalog role and trust setup are deferred
+    Value: !Ref DatabricksStoragePolicy
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-DatabricksStoragePolicyArn'
+  SnowflakePublishPolicyArn:
+    Description: Unattached policy; Snowflake role and integration trust are deferred
+    Value: !Ref SnowflakePublishPolicy
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-SnowflakePublishPolicyArn'

@@ -77,6 +77,32 @@ services:
       kafka-init:
         condition: service_completed_successfully
 
+  raw-consumer:
+    profiles: ["hybrid-raw"]
+    build:
+      context: ..
+      dockerfile: docker/raw-consumer/Dockerfile
+    restart: "no"
+    env_file:
+      - ../.env
+    environment:
+      KAFKA_BROKER: kafka:29092
+      RAW_SPOOL_PATH: /var/lib/raw-landing/spool.sqlite3
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - raw-landing-state:/var/lib/raw-landing
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    stop_grace_period: 120s
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   spark-master:
     build:
       context: ..
@@ -266,3 +292,4 @@ volumes:
   spark-data:
   airflow-postgres-data:
   airflow-logs:
+  raw-landing-state:

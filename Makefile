@@ -34,6 +34,12 @@ deploy: ## Deploy AWS infrastructure via CloudFormation
 teardown: ## Destroy all AWS CloudFormation stacks
 	bash cloudformation/teardown-all.sh
 
+deploy-hybrid: ## Deploy optional hybrid-access + Databricks storage-role stacks (05, 06); requires stack 01 first
+	bash cloudformation/deploy-hybrid.sh
+
+teardown-hybrid: ## Destroy the hybrid-access + Databricks storage-role stacks (06, 05); run before teardown-all
+	bash cloudformation/teardown-hybrid.sh
+
 validate-cfn: ## Validate CloudFormation templates
 	cfn-lint cloudformation/*.yaml
 
