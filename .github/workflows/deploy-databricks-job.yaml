@@ -1,0 +1,178 @@
+name: Deploy Databricks Job
+
+# Deploys and runs the landed_ticks wheel-task bundle (databricks/databricks.yml)
+# against a small generated fixture, completing R1. Reads catalog/bucket/service-
+# principal values directly from the workspace Terraform root's remote state
+# (no manual copying) via deploy-databricks-platform.yaml's backend.
+#
+# Prerequisites: deploy-databricks-platform.yaml has already run successfully
+# in the same environment/region. Needs repo secrets DATABRICKS_HOST and
+# DATABRICKS_TOKEN (already added for that workflow) and AWS_DEPLOY_ROLE_ARN.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      aws-region:
+        description: 'AWS region (must match the platform deploy)'
+        required: true
+        default: 'us-east-2'
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  read-platform-state:
+    name: Read Bundle Variables From Terraform State
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      catalog: ${{ steps.vars.outputs.catalog }}
+      schema_prefix: ${{ steps.vars.outputs.schema_prefix }}
+      bucket: ${{ steps.vars.outputs.bucket }}
+      run_as_service_principal: ${{ steps.vars.outputs.run_as_service_principal }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Read Terraform state backend outputs (stack 00 must already exist)
+        id: state
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformStateBucketName'].OutputValue" --output text)
+          TABLE=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformLockTableName'].OutputValue" --output text)
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "table=${TABLE}" >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state, read-only)
+        working-directory: databricks/terraform/workspace
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ steps.state.outputs.bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ steps.state.outputs.table }}"
+
+      - name: Read bundle_variables output
+        id: vars
+        working-directory: databricks/terraform/workspace
+        run: |
+          terraform output -json bundle_variables > /tmp/bundle_vars.json
+          echo "catalog=$(jq -r .catalog /tmp/bundle_vars.json)" >> "$GITHUB_OUTPUT"
+          echo "schema_prefix=$(jq -r .schema_prefix /tmp/bundle_vars.json)" >> "$GITHUB_OUTPUT"
+          echo "bucket=$(jq -r .bucket /tmp/bundle_vars.json)" >> "$GITHUB_OUTPUT"
+          echo "run_as_service_principal=$(jq -r .run_as_service_principal /tmp/bundle_vars.json)" >> "$GITHUB_OUTPUT"
+
+  deploy-and-run:
+    name: Bundle Validate, Deploy, Run
+    runs-on: ubuntu-latest
+    needs: read-platform-state
+    environment: ${{ inputs.environment }}
+    env:
+      BUNDLE_VAR_catalog: ${{ needs.read-platform-state.outputs.catalog }}
+      BUNDLE_VAR_schema_prefix: ${{ needs.read-platform-state.outputs.schema_prefix }}
+      BUNDLE_VAR_bucket: ${{ needs.read-platform-state.outputs.bucket }}
+      BUNDLE_VAR_run_as_service_principal: ${{ needs.read-platform-state.outputs.run_as_service_principal }}
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: databricks/setup-cli@main
+
+      - name: Generate and upload a small fixture tick file
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, json, os
+          from datetime import datetime, timezone
+
+          run_id = os.environ["GITHUB_RUN_ID"]
+          now = datetime.now(timezone.utc).isoformat()
+          payload = {
+              "symbol": "AAPL",
+              "price": 150.25,
+              "volume": 1000,
+              "timestamp": now,
+              "source": "ci_fixture",
+          }
+          envelope = {
+              "schema_version": 1,
+              "source_id": f"ci-fixture-{run_id}",
+              "topic": "raw_stock_ticks",
+              "partition": 0,
+              "offset": 1,
+              "kafka_timestamp": None,
+              "ingested_at": now,
+              "key_base64": None,
+              "value_base64": base64.b64encode(json.dumps(payload).encode()).decode(),
+              "headers": [],
+          }
+          with gzip.open("/tmp/ci-fixture.json.gz", "wt") as f:
+              f.write(json.dumps(envelope) + "\n")
+          PY
+          aws s3 cp /tmp/ci-fixture.json.gz \
+            "s3://${BUNDLE_VAR_bucket}/landing/ticks/ci-fixture/${GITHUB_RUN_ID}.json.gz" \
+            --region "${{ inputs.aws-region }}"
+
+      - name: databricks bundle validate
+        working-directory: databricks
+        run: databricks bundle validate -t dev
+
+      - name: databricks bundle deploy
+        working-directory: databricks
+        run: databricks bundle deploy -t dev
+
+      - name: databricks bundle run (landed_ticks)
+        working-directory: databricks
+        run: databricks bundle run -t dev landed_ticks
+
+      - name: Verify the five owned Unity Catalog tables exist
+        env:
+          CATALOG: ${{ needs.read-platform-state.outputs.catalog }}
+          PREFIX: ${{ needs.read-platform-state.outputs.schema_prefix }}
+        run: |
+          for table in \
+            "${CATALOG}.${PREFIX}_bronze.ticks_raw" \
+            "${CATALOG}.${PREFIX}_silver.quote_samples" \
+            "${CATALOG}.${PREFIX}_silver.ticks_quarantine" \
+            "${CATALOG}.${PREFIX}_gold.daily_quote_summary" \
+            "${CATALOG}.${PREFIX}_gold.ticks_pipeline_state"; do
+            echo ">>> Checking ${table}"
+            databricks tables get "${table}" > /dev/null
+          done
+          echo "All five owned tables exist. Check ticks_pipeline_state's" \
+               "'status' column in the Databricks UI/a notebook to confirm" \
+               "'completed', and review quote_samples/ticks_quarantine row" \
+               "counts - this workflow only proves the tables exist, not their" \
+               "row-level contents (no SQL warehouse is deployed for this slice)."

@@ -193,35 +193,32 @@ bucket verified working), and the user deploys everything through GitHub
 Actions with OIDC rather than local CLI credentials. The concrete remaining
 sequence:
 
-1. Read this guide and check Git state; inspect touched files before edits.
-2. Via [deploy-infra.yaml](../.github/workflows/deploy-infra.yaml)
-   (`aws-region: us-east-2`), deploy stacks `01`-`04` if not already present.
-   This creates the real project bucket
-   `stock-market-pipeline-datalake-dev-<account-id>`, separate from any personal
-   test bucket used during preflight.
-3. Run [deploy-databricks-platform.yaml](../.github/workflows/deploy-databricks-platform.yaml)
-   once. This single workflow now automates the entire remaining bootstrap:
-   Terraform state backend (stack `00`) -> stacks `05`/`06` (deny-all trust) ->
-   `credential` root bootstrap apply -> reads its generated
-   `unity_catalog_principal_arn`/`unity_catalog_external_id` -> re-deploys `06`
-   with real trust -> re-applies `credential` root with validation -> applies
-   the `workspace` root (catalog/schemas/external locations/service principal).
-   No manual value copy-pasting between steps; both Terraform roots now use a
-   remote S3 backend (see [terraform/README.md](../databricks/terraform/README.md#state-and-authentication))
-   so state persists correctly across this workflow's separate jobs. Needs repo
-   secrets `AWS_DEPLOY_ROLE_ARN` (existing), `DATABRICKS_HOST`, `DATABRICKS_TOKEN`
-   (a personal access token).
-4. Confirm the real external locations with "Test Connection" in the Databricks
-   UI (same check already proven against the personal test bucket).
-5. Set `BUNDLE_VAR_*` from the workflow's final `bundle_variables` output,
-   `databricks bundle validate -t dev`, then an explicitly authorized
-   `databricks bundle deploy -t dev` and one `databricks bundle run -t dev
-   landed_ticks` against a small fixture. The serverless
-   `environment_key`/`environments` block in `databricks.yml` is unverified
-   against a live workspace — check `bundle validate` output carefully. This
-   step has no GitHub workflow yet (Databricks CLI + bundle deploy/run is a
-   natural next automation candidate, deferred until the platform bootstrap
-   above is proven live).
+**Steps 1-4 below are DONE as of 2026-09-25** (stacks `01`-`06`, both Terraform
+roots, all 6 external locations, the catalog/schemas/service principal exist
+live in the real workspace/bucket in `us-east-2`). Remaining:
+
+1. ~~Deploy stacks `01`-`04`~~ — done.
+2. ~~Run `deploy-databricks-platform.yaml`~~ — done; all resources created
+   (one retry needed for the `landing` external location — see change ledger).
+3. ~~Confirm external locations with Test Connection~~ — proven via the
+   equivalent check on the personal test bucket during preflight; the real
+   bucket's locations were created but not yet individually re-tested in the UI.
+4. Run [deploy-databricks-job.yaml](../.github/workflows/deploy-databricks-job.yaml)
+   — reads `bundle_variables` straight from the `workspace` root's remote state
+   (no manual copying), generates and uploads a small known-good fixture tick
+   file, then runs `databricks bundle validate/deploy/run -t dev`, then checks
+   the five owned tables exist via `databricks tables get`. The fixture was
+   verified locally by round-tripping it through the real
+   `src/batch/landed_ticks.py::normalize_envelope` — it passes validation
+   (`rejection_reason: None`), so it should land in `quote_samples`/
+   `daily_quote_summary`, not quarantine. The serverless
+   `environment_key`/`environments` block in `databricks.yml` is still
+   unverified against a live workspace — this run is the first real test of it.
+5. After that run, manually check `ticks_pipeline_state`'s `status` column and
+   `quote_samples`/`ticks_quarantine` row counts in a Databricks
+   notebook/SQL editor — `deploy-databricks-job.yaml` only proves the five
+   tables exist, not their row-level contents (no SQL warehouse is deployed
+   for this slice).
 6. Record versions/counts, quarantine cases, replay/no-op behavior,
    failed-publication recovery, and measured cost in this ledger before
    proceeding to the first snapshot exporter/Snowflake slice. To tear down,
@@ -339,6 +336,7 @@ source for exact diffs. Dates/revisions below describe completed prior work.
 | 2026-09-24 | Cross-assistant handover | This ledger/roadmap and durable instruction to maintain it; documentation-only, based on the preceding Git anchor |
 | 2026-09-25 | Fully automated Databricks platform bootstrap/teardown pipeline | User merged the feature branch to `main` and asked for zero-manual-step, remote-state-backed IaC ("no manual creation... like big companies do") instead of the local-Docker/copy-paste sequence from 2026-09-24. Added [cloudformation/00-terraform-state.yaml](../cloudformation/00-terraform-state.yaml) (S3 bucket + DynamoDB lock table, both `DeletionPolicy: Retain`, deliberately outside the data bucket's teardown blast radius). Added `backend "s3" {}` to both `databricks/terraform/credential/main.tf` and `workspace/main.tf` (backend values supplied via `-backend-config` at init time; `-backend=false` offline validation unaffected) — required because the `credential` root is applied twice and a disposable CI runner has no local disk continuity between those applies. Added [deploy-databricks-platform.yaml](../.github/workflows/deploy-databricks-platform.yaml) (5 chained jobs: bootstrap state+role -> credential bootstrap apply -> activate real IAM trust -> credential validate apply -> workspace-objects apply, each job's outputs feeding the next automatically) and its reverse, [teardown-databricks-platform.yaml](../.github/workflows/teardown-databricks-platform.yaml). Updated [databricks/terraform/README.md](../databricks/terraform/README.md) to describe the remote backend and point to the new workflow as the primary path, keeping the manual step-by-step description as reference/troubleshooting docs. Verified: `cfn-lint` passed on the new template and the full `cloudformation/*.yaml` set; both new workflow YAML files parse; **not verified**: an actual run of either new workflow (needs `DATABRICKS_HOST`/`DATABRICKS_TOKEN` secrets added first, and stack `01` deployed in `us-east-2`), and `terraform validate`/`terraform test` were not re-run against the backend-block change (Terraform CLI still unavailable in this environment) |
 | 2026-09-24 | Free Edition preflight and serverless re-plan | User confirmed AWS teardown complete and provided Databricks account details (workspace `7474656307742289`, `us-east-2`). Live-tested Unity Catalog storage credential + external location against a personal S3 bucket in the user's actual Free Edition workspace: Test Connection passed all checks, and a serverless notebook wrote/read a real Delta table through it — corrected the prior (incorrect) assumption that Free Edition cannot use external S3 storage. Removed `databricks_cluster_policy`/`databricks_permissions` from `workspace/main.tf` and the classic `job_clusters` block from `databricks.yml` (replaced with a serverless `environment_key`/`environments` block); updated the matching Terraform test (`workspace/safety.tftest.hcl`) and Python test (`tests/unit/test_databricks_ticks.py`); updated `databricks/README.md`, `databricks/terraform/README.md`, `docs/hybrid-migration.md` to state verified Free Edition compatibility instead of the earlier uncertainty. Moved the project's AWS region default from `us-east-1` to `us-east-2` in `deploy-infra.yaml`/`teardown-infra.yaml`. Added `cloudformation/deploy-hybrid.sh` + `teardown-hybrid.sh` and `.github/workflows/deploy-hybrid-infra.yaml` + `teardown-hybrid-infra.yaml` to bring stacks `05`/`06` under the same GitHub-Actions-with-OIDC pattern already used for stacks `01`-`04`, since the user deploys everything via GitHub Actions rather than local CLI credentials. Uncommitted; `pytest tests/unit/test_databricks_ticks.py` (34 passed) and a YAML syntax check on all edited workflow/bundle files were run — `terraform fmt/validate/test` for the edited `workspace` root was **not** re-run (Terraform CLI unavailable in this environment) and remains a gate before the next real apply |
+| 2026-09-25 | First live run of `deploy-databricks-platform.yaml`; R1 platform bootstrap complete; job-deploy automation added | Real run against the actual AWS account/workspace surfaced and fixed two genuine bugs, not environment misconfiguration: (1) `06-databricks-storage-role.yaml`'s deny-all bootstrap statement used `Principal: '*'`, which IAM trust policies reject (they require a typed principal like `{"AWS": "*"}`, unlike S3-style resource policies) — fixed, and `tests/unit/test_databricks_platform.py` updated to match; (2) the `landing` external location (the only `read_only=true` one) failed Unity Catalog's creation-time validation with a misleading "no LIST permission" error, because a brand-new bucket has zero objects under `landing/ticks/` and UC can't use its usual write-probe validation on a read-only path — fixed by adding an automated placeholder-object step (`landing/ticks/.keep` via `aws s3api put-object`, using a real temp file after `--body /dev/null` itself hit an unrelated AWS CLI/botocore quirk) to the `bootstrap` job. After both fixes, a full run succeeded: catalog `stock_market_dev`, 3 schemas, all 6 external locations, the runtime service principal, and all grants exist live in `us-east-2` against the real project bucket. Remote state correctly preserved the 19 resources created before the `landing` failure, so the fix-and-retry only created what was missing. Added [deploy-databricks-job.yaml](../.github/workflows/deploy-databricks-job.yaml): reads `bundle_variables` directly from the `workspace` root's remote state (no manual copying), generates+uploads a small fixture tick file, runs `databricks bundle validate/deploy/run -t dev`, then checks the five owned tables exist via `databricks tables get`. The fixture-generation logic was verified locally by importing the real `src/batch/landed_ticks.py::normalize_envelope` and confirming the generated envelope passes (`rejection_reason: None`). **Not yet run**: `deploy-databricks-job.yaml` itself — this is the next concrete action |
 
 ### Required Update After Every Implementation Session
 
