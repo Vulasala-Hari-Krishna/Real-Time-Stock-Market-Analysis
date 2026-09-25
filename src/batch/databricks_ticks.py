@@ -195,52 +195,49 @@ def rebuild_outputs(
         raise ValueError(
             "Bronze exceeds the full-rebuild row limit; incremental design required"
         )
-    classified = classify_ticks(bronze).cache()
-    try:
-        counts = {"accepted": 0, "duplicate": 0, "quarantined": 0}
-        for row in classified.groupBy("record_status").count().collect():
-            counts[row["record_status"]] = row["count"]
-        if sum(counts.values()) != input_count:
-            raise ValueError("Bronze classification counts do not reconcile")
-        silver = classified.filter(F.col("record_status") == "accepted").drop(
-            "raw_json", "record_status", "rejection_reason"
-        )
-        if silver.groupBy(*QUOTE_KEYS).count().filter("count > 1").limit(1).count():
-            raise ValueError("Duplicate business keys in accepted quotes")
-        rejected = classified.filter(F.col("record_status") == "quarantined")
-        gold = summarize_quotes(silver)
-        total = gold.agg(
-            F.coalesce(F.sum("quote_count"), F.lit(0)).alias("total")
-        ).first()
-        if total is None or total["total"] != counts["accepted"]:
-            raise ValueError("Gold quote counts do not reconcile with silver")
-        outputs: dict[Dataset, DataFrame] = {
-            "quotes": silver,
-            "quarantine": rejected,
-            "summary": gold,
-        }
-        for dataset, frame in outputs.items():
-            write_snapshot(
-                frame.withColumn("bronze_version", F.lit(bronze_version)),
-                config,
-                dataset,
-            )
-        state = [
-            "completed",
-            bronze_version,
-            PIPELINE_REVISION,
-            counts["accepted"],
-            counts["duplicate"],
-            counts["quarantined"],
-            *(table_version(spark, config.table(dataset)) for dataset in outputs),
-        ]
+    # No .cache()/.unpersist(): PERSIST TABLE (the block-cache mechanism
+    # they rely on) is not supported on serverless compute (Spark Connect).
+    # classified is recomputed on each action below; acceptable at this
+    # slice's bounded (<= max_input_rows) scale.
+    classified = classify_ticks(bronze)
+    counts = {"accepted": 0, "duplicate": 0, "quarantined": 0}
+    for row in classified.groupBy("record_status").count().collect():
+        counts[row["record_status"]] = row["count"]
+    if sum(counts.values()) != input_count:
+        raise ValueError("Bronze classification counts do not reconcile")
+    silver = classified.filter(F.col("record_status") == "accepted").drop(
+        "raw_json", "record_status", "rejection_reason"
+    )
+    if silver.groupBy(*QUOTE_KEYS).count().filter("count > 1").limit(1).count():
+        raise ValueError("Duplicate business keys in accepted quotes")
+    rejected = classified.filter(F.col("record_status") == "quarantined")
+    gold = summarize_quotes(silver)
+    total = gold.agg(F.coalesce(F.sum("quote_count"), F.lit(0)).alias("total")).first()
+    if total is None or total["total"] != counts["accepted"]:
+        raise ValueError("Gold quote counts do not reconcile with silver")
+    outputs: dict[Dataset, DataFrame] = {
+        "quotes": silver,
+        "quarantine": rejected,
+        "summary": gold,
+    }
+    for dataset, frame in outputs.items():
         write_snapshot(
-            spark.createDataFrame([tuple(state)], STATE_SCHEMA), config, "state"
+            frame.withColumn("bronze_version", F.lit(bronze_version)),
+            config,
+            dataset,
         )
-        logger.info("Completed bronze_version=%s counts=%s", bronze_version, counts)
-        return counts
-    finally:
-        classified.unpersist()
+    state = [
+        "completed",
+        bronze_version,
+        PIPELINE_REVISION,
+        counts["accepted"],
+        counts["duplicate"],
+        counts["quarantined"],
+        *(table_version(spark, config.table(dataset)) for dataset in outputs),
+    ]
+    write_snapshot(spark.createDataFrame([tuple(state)], STATE_SCHEMA), config, "state")
+    logger.info("Completed bronze_version=%s counts=%s", bronze_version, counts)
+    return counts
 
 
 def run(spark: SparkSession, config: TickJobConfig) -> dict[str, int] | None:

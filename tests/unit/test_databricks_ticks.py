@@ -180,7 +180,6 @@ def test_publication_state_is_completed_only_after_validated_outputs(
         config.max_input_rows + 1 if failure == "row_limit" else 3
     )
     classified = MagicMock()
-    classified.cache.return_value = classified
     classified.groupBy.return_value.count.return_value.collect.return_value = [
         {"record_status": "accepted", "count": 1},
         {"record_status": "duplicate", "count": 1},
@@ -219,8 +218,8 @@ def test_publication_state_is_completed_only_after_validated_outputs(
             ]
         states = [call.args[0][0][0] for call in spark.createDataFrame.call_args_list]
         assert states == (["processing"] if failure else ["processing", "completed"])
-    if failure != "row_limit":
-        classified.unpersist.assert_called_once()
+    classified.cache.assert_not_called()
+    classified.unpersist.assert_not_called()
     spark.read.option.assert_called_once_with("versionAsOf", 2)
 
 
