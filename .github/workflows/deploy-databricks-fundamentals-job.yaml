@@ -1,17 +1,21 @@
 name: Deploy Databricks Fundamentals Job
 
 # R6: deploys and runs the landed_fundamentals wheel-task bundle
-# (databricks/databricks.yml) against a small generated fixture - the same
-# pattern deploy-databricks-job.yaml already proved for landed_ticks, now
-# for the second job in the same bundle. Reads catalog/bucket values
-# directly from the workspace Terraform root's remote state (no manual
-# copying).
+# (databricks/databricks.yml). Unlike landed_ticks, this job fetches
+# yfinance directly (no S3 landing file/fixture involved) - the actual
+# yfinance calls happen on Databricks serverless compute, not on this
+# GitHub Actions runner, deliberately: GitHub Actions owns infra deploy/
+# update/teardown in this project, never business job execution (a
+# GitHub-Actions-hosted fetch was tried and abandoned after Yahoo Finance
+# persistently rate-limited every request from GitHub's shared runner IP
+# range - see landed_fundamentals.py's module docstring). Reads catalog/
+# bucket values directly from the workspace Terraform root's remote state
+# (no manual copying).
 #
 # Prerequisites: deploy-databricks-platform.yaml has already run
-# successfully (including the broadened "landing" external location - see
-# databricks/terraform/workspace/main.tf) in the same environment/region.
-# Needs repo secrets DATABRICKS_HOST, DATABRICKS_TOKEN, AWS_DEPLOY_ROLE_ARN
-# (all already used by the ticks job workflow).
+# successfully in the same environment/region. Needs repo secrets
+# DATABRICKS_HOST, DATABRICKS_TOKEN, AWS_DEPLOY_ROLE_ARN (all already used
+# by the ticks job workflow).
 
 on:
   workflow_dispatch:
@@ -112,39 +116,6 @@ jobs:
 
       - uses: databricks/setup-cli@main
 
-      - name: Generate and upload a small fixture fundamentals file
-        run: |
-          # Fixed extraction_id/retrieved_at/S3 key on every run, deliberately
-          # - the same idempotent-fixture lesson learned for landed_ticks:
-          # Auto Loader tracks already-seen files by path in its checkpoint,
-          # so re-uploading the same path each run correctly finds nothing
-          # new to ingest, exercising the no-op/replay skip instead of
-          # accumulating a "changed" snapshot per workflow run.
-          python3 - <<'PY'
-          import gzip, json
-
-          record = {
-              "extraction_id": "ci-fixture-v1",
-              "symbol": "AAPL",
-              "retrieved_at": "2026-01-01T00:00:00+00:00",
-              "market_cap": 2800000000000.0,
-              "pe_ratio": 28.5,
-              "forward_pe": 26.0,
-              "dividend_yield": 0.005,
-              "eps": 6.25,
-              "beta": 1.2,
-              "fifty_two_week_high": 199.6,
-              "fifty_two_week_low": 143.9,
-              "sector": "Technology",
-              "industry": "Consumer Electronics",
-          }
-          with gzip.open("/tmp/ci-fixture-fundamentals.json.gz", "wt") as f:
-              f.write(json.dumps(record) + "\n")
-          PY
-          aws s3 cp /tmp/ci-fixture-fundamentals.json.gz \
-            "s3://${BUNDLE_VAR_bucket}/landing/fundamentals/ci-fixture/fixture-v1.json.gz" \
-            --region "${{ inputs.aws-region }}"
-
       - name: databricks bundle validate
         working-directory: databricks
         run: databricks bundle validate -t dev
@@ -157,22 +128,20 @@ jobs:
         working-directory: databricks
         run: databricks bundle run -t dev landed_fundamentals
 
-      - name: Verify the four owned Unity Catalog tables exist
+      - name: Verify the three owned Unity Catalog tables exist
         env:
           CATALOG: ${{ needs.read-platform-state.outputs.catalog }}
           PREFIX: ${{ needs.read-platform-state.outputs.schema_prefix }}
         run: |
           for table in \
             "${CATALOG}.${PREFIX}_bronze.fundamentals_raw" \
-            "${CATALOG}.${PREFIX}_silver.fundamentals_quarantine" \
             "${CATALOG}.${PREFIX}_gold.fundamentals" \
             "${CATALOG}.${PREFIX}_gold.fundamentals_pipeline_state"; do
             echo ">>> Checking ${table}"
             databricks tables get "${table}" > /dev/null
           done
-          echo "All four owned tables exist. Check fundamentals_pipeline_state's" \
+          echo "All three owned tables exist. Check fundamentals_pipeline_state's" \
                "'status' column in the Databricks UI/a notebook to confirm" \
-               "'completed', and review the fundamentals/fundamentals_quarantine" \
-               "row counts - this workflow only proves the tables exist, not" \
-               "their row-level contents (no SQL warehouse is deployed for" \
-               "this slice)."
+               "'completed', and review the fundamentals row count/values -" \
+               "this workflow only proves the tables exist, not their" \
+               "row-level contents (no SQL warehouse is deployed for this slice)."

@@ -44,10 +44,10 @@ run "platform_boundaries" {
   assert {
     condition = (
       databricks_external_location.ticks["landing"].read_only &&
-      databricks_external_location.ticks["landing"].url == "s3://offline-test-bucket/landing" &&
+      databricks_external_location.ticks["landing"].url == "s3://offline-test-bucket/landing/ticks" &&
       toset(databricks_grant.locations_runtime["landing"].privileges) == toset(["READ_FILES"])
     )
-    error_message = "Runtime must only read (never write) the shared landing/ prefix (ticks, fundamentals, and future datasets)."
+    error_message = "Runtime must only read the consumer's raw tick prefix."
   }
   assert {
     condition = (
