@@ -51,29 +51,35 @@ The [foundation contract](../docs/hybrid-migration.md) defines raw transport fie
 ## Fundamentals Slice (R6)
 
 A second, independent job in the same bundle - `landed_fundamentals` - migrates
-the legacy `fundamental_enrichment.py` product. No Kafka transport layer to
-preserve here; a local fetcher lands a periodic whole-watchlist snapshot instead
-of a continuous stream:
+the legacy `fundamental_enrichment.py` product. **No S3 landing stage at all**
+(unlike ticks): the job calls yfinance directly from Databricks compute, the
+same way the legacy Spark job already fetched yfinance from inside itself. An
+earlier design landed a separately-fetched file to `landing/fundamentals/` for
+Auto Loader to ingest; it was built, tried live via a GitHub Actions workflow,
+and abandoned after Yahoo Finance persistently rate-limited every request from
+GitHub's shared runner IP (and, independently, because running the fetch on a
+GitHub Actions runner put business job execution somewhere this project
+deliberately keeps infra-only). See the
+[Fundamentals Snapshot Contract](../docs/hybrid-migration.md#fundamentals-snapshot-contract-r6)
+for the full story and current data contract:
 
 ```text
-landing/fundamentals/**/*.json.gz  (src/producers/fundamentals_fetcher.py)
-    -> Auto Loader text ingestion, AvailableNow
-    -> <catalog>.<prefix>_bronze.fundamentals_raw
-    -> FundamentalData validation + latest-per-symbol ranking
-    -> <catalog>.<prefix>_gold.fundamentals            (one row per symbol)
-    |-> <catalog>.<prefix>_silver.fundamentals_quarantine
+yfinance (direct fetch, src/batch/landed_fundamentals.py::fetch_all)
+    -> <catalog>.<prefix>_bronze.fundamentals_raw   (append-only across runs)
+    -> latest-per-symbol ranking across all bronze history
+    -> <catalog>.<prefix>_gold.fundamentals         (one row per symbol)
     |-> <catalog>.<prefix>_gold.fundamentals_pipeline_state
 ```
 
 The runner is [databricks_fundamentals.py](../src/batch/databricks_fundamentals.py);
-reusable transformations are in
-[landed_fundamentals.py](../src/batch/landed_fundamentals.py). See the
-[Fundamentals Snapshot Contract](../docs/hybrid-migration.md#fundamentals-snapshot-contract-r6)
-for the full data contract, including why the `landing` external location was
-broadened from `landing/ticks` to the `landing` parent prefix.
+reusable fetch/validation and transform logic is in
+[landed_fundamentals.py](../src/batch/landed_fundamentals.py). Every run fetches
+fresh data and rebuilds gold - there is no landed-file checkpoint to make a run
+idempotent against, so (unlike `landed_ticks`) there is no "already current"
+no-op skip.
 [deploy-databricks-fundamentals-job.yaml](../.github/workflows/deploy-databricks-fundamentals-job.yaml)
-deploys/runs it the same way `deploy-databricks-job.yaml` proved for
-`landed_ticks`; not yet run against a live workspace.
+deploys/runs it (validate -> deploy -> run -> verify tables exist, no fixture
+needed since there's no landing file); not yet run against a live workspace.
 
 ## Data Semantics
 

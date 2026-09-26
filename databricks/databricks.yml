@@ -67,15 +67,18 @@ resources:
 
     landed_fundamentals:
       name: stock-market-hybrid-${bundle.target}-landed-fundamentals
-      description: Manual AvailableNow ingestion and latest-per-symbol fundamentals snapshot (serverless compute, R6)
+      description: Manual direct-fetch (yfinance) and latest-per-symbol fundamentals snapshot (serverless compute, R6)
       max_concurrent_runs: 1
-      timeout_seconds: 1800
+      # Longer than landed_ticks: fetching 10 symbols with retry/backoff and
+      # inter-symbol spacing can take a few minutes even when yfinance is
+      # healthy, and considerably longer if several symbols need retries.
+      timeout_seconds: 2700
       queue:
         enabled: false
       tasks:
-        - task_key: ingest_and_rebuild_fundamentals
+        - task_key: fetch_and_rebuild_fundamentals
           environment_key: fundamentals_env
-          timeout_seconds: 1800
+          timeout_seconds: 2700
           max_retries: 0
           retry_on_timeout: false
           python_wheel_task:
@@ -92,8 +95,12 @@ resources:
         - environment_key: fundamentals_env
           spec:
             environment_version: "4"
+            # yfinance itself (not just the wheel) - this job calls the
+            # external API directly, unlike landed_ticks which only reads
+            # already-landed S3 files.
             dependencies:
               - ./dist/*.whl
+              - yfinance==0.2.36
 
 targets:
   dev:

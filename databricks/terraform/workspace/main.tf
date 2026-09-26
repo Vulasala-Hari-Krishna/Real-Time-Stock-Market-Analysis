@@ -75,13 +75,15 @@ provider "databricks" {
 locals {
   name = "${var.catalog}_${var.schema_prefix}"
   locations = merge({
-    # Broadened from "landing/ticks" to the "landing" parent prefix (R6):
-    # fundamentals now lands under landing/fundamentals/, and this covers
-    # any future landing/<dataset>/ without a new external location per
-    # dataset - a read-only location already grants only READ_FILES, so
-    # widening its prefix doesn't grant any new write capability.
+    # Scoped to landing/ticks specifically: only the ticks slice lands raw
+    # files to S3 for Databricks to ingest. Fundamentals (R6) fetches
+    # yfinance directly inside its own job instead of landing files first,
+    # so it needs no S3 read access here at all - briefly widened to the
+    # "landing" parent prefix while fundamentals was designed around a
+    # landing-file approach, then reverted after that approach was
+    # abandoned (see landed_fundamentals.py's module docstring).
     landing = {
-      path       = "landing"
+      path       = "landing/ticks"
       read_only  = true
       privileges = ["READ_FILES"]
     }

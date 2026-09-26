@@ -227,23 +227,34 @@ bootstrap, ordering, tombstone, retention, and recovery contract.
 ## Fundamentals Snapshot Contract (R6)
 
 R6's first migrated legacy product (`fundamental_enrichment.py`). Unlike ticks,
-fundamentals have no Kafka transport layer to preserve - a local fetcher
-(`src/producers/fundamentals_fetcher.py`) periodically snapshots the whole
-watchlist from yfinance and lands one immutable, content-addressed NDJSON batch
-to `landing/fundamentals/extraction_id=<id>/fundamentals.json.gz`. Each line is
-one symbol's `FundamentalData` fields (`src/common/schemas.py`) plus the
-`extraction_id` for bronze lineage - the same canonical model the legacy Spark
-job already validated against, not a new contract invented from scratch.
+fundamentals have **no local component and no S3 landing stage at all**:
+`src/batch/databricks_fundamentals.py` calls yfinance directly from inside the
+Databricks job (`landed_fundamentals.py::fetch_all`), the same way the legacy
+Spark job already fetched yfinance from inside itself. An earlier design that
+landed a fetcher's output to `landing/fundamentals/` for Auto Loader to ingest
+was built, tried live via a GitHub Actions workflow, and abandoned: Yahoo
+Finance persistently rate-limited every request from GitHub's shared runner IP
+range even with retry/backoff (40/40 attempts across 10 symbols got `429 Too
+Many Requests` in one live run), and - independently of that failure - running
+the actual data-fetching business logic on a GitHub Actions runner conflicts
+with this project's ownership boundary: **GitHub Actions owns infra deploy/
+update/teardown here, never job execution.** Business logic runs on Databricks
+(or locally, for the legacy Kafka/Airflow components); GitHub Actions only
+triggers `databricks bundle run` and never itself executes the fetch.
 
-Databricks (`src/batch/databricks_fundamentals.py`, mirroring
-`databricks_ticks.py`'s bronze/silver/gold/state pattern) ingests via Auto
-Loader into `fundamentals_raw`, re-validates independently (never trusts the
-landed JSON blindly), and classifies each row as `accepted` (the latest valid
-snapshot per symbol), `superseded` (an older valid snapshot for a symbol that
-was re-fetched later - an expected refresh, not a data-quality conflict, so
-never quarantined), or `quarantined` (invalid). Gold `fundamentals` is the
-`accepted` rows only - one row per symbol, the latest known snapshot, not a
-time series. Business key is `(symbol)` alone.
+Each symbol's yfinance response is validated against `FundamentalData`
+(`src/common/schemas.py` - the same canonical model the legacy Spark job
+already used, not a new contract) with retry/backoff for transient failures.
+Successfully fetched/validated rows are tagged with a shared `extraction_id`
+and appended straight to bronze `fundamentals_raw` (append-only across job
+runs - every run is a genuine new observation, not a replay of previously-seen
+data, so there is no landed-file checkpoint to make idempotent and no
+`quarantine` table: a failed fetch is logged and simply absent from bronze,
+not persisted as a business record, since the failure happened inside this
+same trusted process rather than in an untrusted upstream file). Gold
+`fundamentals` is the latest row per symbol across bronze's accumulated
+history - one row per symbol, not a time series. Business key is `(symbol)`
+alone.
 
 Publishes through the same Gold Snapshot Contract v1 exporter
 (`DATASET_BUSINESS_KEYS["fundamentals"] = ("symbol",)`,
@@ -253,13 +264,13 @@ loader (`src/load/snowflake_snapshot.py`, its own staging/serving DDL in
 `snowflake/sql/004_staging_fundamentals.sql` /
 `005_serving_fundamentals.sql`) - both were built generic across datasets in
 R2/R4 specifically so a second product would not need a redesign, only a
-registry entry each.
+registry entry each. Neither needed any change for this redesign: they operate
+on gold, which looks the same regardless of how bronze was populated.
 
-The Unity Catalog `landing` external location was broadened from
-`landing/ticks` to the `landing` parent prefix to cover
-`landing/fundamentals/` (and any future `landing/<dataset>/`) without a new
-external location per dataset - it stays read-only (`READ_FILES` only), so
-this widens what Databricks can *read*, never what it can write.
+The Unity Catalog `landing` external location stays scoped to `landing/ticks`
+only - it was briefly broadened to the `landing` parent prefix while the
+landing-file design was in place, then reverted once that design was
+abandoned, since fundamentals needs no S3 read access at all.
 
 ## Access and IaC Ownership
 
