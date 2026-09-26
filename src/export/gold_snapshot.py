@@ -43,9 +43,11 @@ MANIFEST_VERSION = 1
 # a dataset's keys implicitly from its column list.
 DATASET_BUSINESS_KEYS: dict[str, tuple[str, ...]] = {
     "daily_quote_summary": ("provider", "symbol", "capture_date_utc"),
+    "fundamentals": ("symbol",),
 }
 DATASET_CUTOFF_COLUMN: dict[str, str] = {
     "daily_quote_summary": "capture_date_utc",
+    "fundamentals": "retrieved_at",
 }
 
 

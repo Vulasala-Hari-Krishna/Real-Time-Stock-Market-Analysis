@@ -65,6 +65,36 @@ resources:
             dependencies:
               - ./dist/*.whl
 
+    landed_fundamentals:
+      name: stock-market-hybrid-${bundle.target}-landed-fundamentals
+      description: Manual AvailableNow ingestion and latest-per-symbol fundamentals snapshot (serverless compute, R6)
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+      queue:
+        enabled: false
+      tasks:
+        - task_key: ingest_and_rebuild_fundamentals
+          environment_key: fundamentals_env
+          timeout_seconds: 1800
+          max_retries: 0
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: stock_market_hybrid
+            entry_point: landed_fundamentals
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema-prefix
+              - ${var.schema_prefix}
+              - --bucket
+              - ${var.bucket}
+      environments:
+        - environment_key: fundamentals_env
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ./dist/*.whl
+
 targets:
   dev:
     default: true

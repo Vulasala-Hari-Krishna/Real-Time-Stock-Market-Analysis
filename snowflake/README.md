@@ -1,5 +1,13 @@
 # Snowflake Snapshot Loader (R4) and Historical Dashboard View (R5)
 
+Both the exporter (`src/export/gold_snapshot.py`) and this loader
+(`src/load/snowflake_snapshot.py`) were built generic across datasets, not
+hand-tied to `daily_quote_summary` - R6's `fundamentals` dataset (see
+[docs/hybrid-migration.md](../docs/hybrid-migration.md#fundamentals-snapshot-contract-r6))
+needed only a registry entry in each plus its own
+`snowflake/sql/004_staging_fundamentals.sql` /
+`005_serving_fundamentals.sql`, not a redesign.
+
 ## Status
 
 **R4 is DONE and fully verified live** (loader ran successfully, row-level

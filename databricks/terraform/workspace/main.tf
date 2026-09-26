@@ -75,8 +75,13 @@ provider "databricks" {
 locals {
   name = "${var.catalog}_${var.schema_prefix}"
   locations = merge({
+    # Broadened from "landing/ticks" to the "landing" parent prefix (R6):
+    # fundamentals now lands under landing/fundamentals/, and this covers
+    # any future landing/<dataset>/ without a new external location per
+    # dataset - a read-only location already grants only READ_FILES, so
+    # widening its prefix doesn't grant any new write capability.
     landing = {
-      path       = "landing/ticks"
+      path       = "landing"
       read_only  = true
       privileges = ["READ_FILES"]
     }

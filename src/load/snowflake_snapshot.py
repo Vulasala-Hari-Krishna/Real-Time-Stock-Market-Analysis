@@ -60,14 +60,20 @@ CONTROL_SQL_FILE = "001_control_batch_ledger.sql"
 # never infer a table's shape implicitly from an incoming manifest.
 DATASET_STAGING_TABLE: dict[str, str] = {
     "daily_quote_summary": "DAILY_QUOTE_SUMMARY_STAGING",
+    "fundamentals": "FUNDAMENTALS_STAGING",
 }
 DATASET_SERVING_TABLE: dict[str, str] = {
     "daily_quote_summary": "DAILY_QUOTE_SUMMARY",
+    "fundamentals": "FUNDAMENTALS",
 }
 DATASET_SQL_FILES: dict[str, tuple[str, str]] = {
     "daily_quote_summary": (
         "002_staging_daily_quote_summary.sql",
         "003_serving_daily_quote_summary.sql",
+    ),
+    "fundamentals": (
+        "004_staging_fundamentals.sql",
+        "005_serving_fundamentals.sql",
     ),
 }
 DATASET_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -88,6 +94,21 @@ DATASET_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         # databricks_ticks.py::rebuild_outputs (F.lit(bronze_version)) -
         # confirmed live 2026-09-26 when a real manifest included it and
         # this registry (hand-derived from summarize_quotes alone) didn't.
+        ("bronze_version", "NUMBER(38,0)"),
+    ),
+    "fundamentals": (
+        ("symbol", "VARCHAR"),
+        ("retrieved_at", "TIMESTAMP_NTZ"),
+        ("market_cap", "DOUBLE"),
+        ("pe_ratio", "DOUBLE"),
+        ("forward_pe", "DOUBLE"),
+        ("dividend_yield", "DOUBLE"),
+        ("eps", "DOUBLE"),
+        ("beta", "DOUBLE"),
+        ("fifty_two_week_high", "DOUBLE"),
+        ("fifty_two_week_low", "DOUBLE"),
+        ("sector", "VARCHAR"),
+        ("industry", "VARCHAR"),
         ("bronze_version", "NUMBER(38,0)"),
     ),
 }
