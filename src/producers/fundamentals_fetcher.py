@@ -17,8 +17,9 @@ import gzip
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from botocore.exceptions import ClientError
@@ -29,6 +30,18 @@ from src.common.schemas import FundamentalData
 from src.config.watchlist import SYMBOLS
 
 logger = logging.getLogger(__name__)
+
+# yfinance's unofficial Yahoo Finance API rate-limits bursts of requests
+# (429 Too Many Requests) - confirmed live 2026-09-26 from a GitHub Actions
+# runner: all 10 symbols were rejected within ~250ms of each other, the
+# classic signature of a burst limit, not necessarily a permanent IP block.
+# Retrying with backoff plus spacing requests apart is the standard
+# mitigation. If 429s persist even with this, the runner's shared IP may
+# be rate-limited/blocked by Yahoo more aggressively than a residential
+# one, and this fetcher (a standalone script, not tied to GitHub Actions)
+# should be run from a different network - e.g. locally - instead.
+RETRY_DELAYS_SECONDS: tuple[float, ...] = (2.0, 5.0, 10.0)
+SYMBOL_DELAY_SECONDS = 1.5
 
 # yfinance Ticker.info key -> FundamentalData field name. Kept independent of
 # src/batch/fundamental_enrichment.py's identical mapping so this fetcher
@@ -47,22 +60,50 @@ YFINANCE_FIELD_MAP: dict[str, str] = {
 }
 
 
-def fetch_one(symbol: str) -> FundamentalData | None:
+def fetch_one(
+    symbol: str, sleep: Callable[[float], None] = time.sleep
+) -> FundamentalData | None:
     """Fetch and validate one symbol's fundamentals; never raises.
+
+    Retries transient yfinance/HTTP failures (e.g. 429 Too Many Requests)
+    with backoff before giving up on this symbol.
 
     Args:
         symbol: Ticker symbol to fetch from yfinance.
+        sleep: Injectable delay function, so tests never actually block.
 
     Returns:
-        A validated record, or None if the fetch/validation failed - logged,
-        not raised, so one bad symbol never blocks the rest of the run.
+        A validated record, or None if every attempt failed/validation
+        failed - logged, not raised, so one bad symbol never blocks the
+        rest of the run.
     """
     import yfinance as yf
 
-    try:
-        info = yf.Ticker(symbol).info
-    except Exception:
-        logger.exception("yfinance fetch failed for %s", symbol)
+    attempt_delays = (0.0, *RETRY_DELAYS_SECONDS)
+    info: dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for attempt, delay in enumerate(attempt_delays):
+        if delay:
+            sleep(delay)
+        try:
+            info = yf.Ticker(symbol).info
+            last_error = None
+            break
+        except Exception as exc:  # yfinance raises a mix of exception types
+            last_error = exc
+            logger.warning(
+                "yfinance fetch failed for %s (attempt %d/%d): %s",
+                symbol,
+                attempt + 1,
+                len(attempt_delays),
+                exc,
+            )
+    if last_error is not None or info is None:
+        logger.error(
+            "yfinance fetch permanently failed for %s after %d attempts",
+            symbol,
+            len(attempt_delays),
+        )
         return None
     fields: dict[str, Any] = {
         target: info.get(source) for source, target in YFINANCE_FIELD_MAP.items()
@@ -134,12 +175,17 @@ def upload_batch(client: Any, bucket: str, key: str, body: bytes) -> None:
     )
 
 
-def run_fetch(bucket: str, symbols: list[str] | None = None) -> dict[str, int]:
+def run_fetch(
+    bucket: str,
+    symbols: list[str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, int]:
     """Fetch the whole watchlist and upload one immutable landing batch.
 
     Args:
         bucket: Target S3 bucket (existing project data lake bucket).
         symbols: Symbols to fetch; defaults to the full watchlist.
+        sleep: Injectable delay function, so tests never actually block.
 
     Returns:
         Counts of fetched vs. skipped symbols.
@@ -151,8 +197,12 @@ def run_fetch(bucket: str, symbols: list[str] | None = None) -> dict[str, int]:
     symbols = symbols or SYMBOLS
     extraction_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
     records = []
-    for symbol in symbols:
-        record = fetch_one(symbol)
+    for index, symbol in enumerate(symbols):
+        if index:
+            # Space requests apart to avoid tripping Yahoo's burst rate
+            # limit in the first place, not just retrying after the fact.
+            sleep(SYMBOL_DELAY_SECONDS)
+        record = fetch_one(symbol, sleep=sleep)
         if record is not None:
             records.append(record)
     if not records:

@@ -43,9 +43,34 @@ def test_fetch_one_returns_a_validated_record() -> None:
     assert record.retrieved_at.utcoffset() is not None
 
 
-def test_fetch_one_returns_none_when_yfinance_raises() -> None:
-    with patch("yfinance.Ticker", side_effect=RuntimeError("network error")):
-        assert fetcher.fetch_one("AAPL") is None
+def test_fetch_one_returns_none_when_yfinance_always_raises() -> None:
+    sleeps: list[float] = []
+    with patch("yfinance.Ticker", side_effect=RuntimeError("429 Too Many Requests")):
+        assert fetcher.fetch_one("AAPL", sleep=sleeps.append) is None
+    # Retries with backoff before giving up - never blocks a real test run.
+    assert sleeps == list(fetcher.RETRY_DELAYS_SECONDS)
+
+
+def test_fetch_one_retries_and_recovers_from_a_transient_failure() -> None:
+    attempts = {"count": 0}
+
+    def flaky_ticker(symbol: str) -> MagicMock:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise RuntimeError("429 Too Many Requests")
+        mock = MagicMock()
+        mock.info = _fake_ticker_info()
+        return mock
+
+    sleeps: list[float] = []
+    with patch("yfinance.Ticker", side_effect=flaky_ticker):
+        record = fetcher.fetch_one("AAPL", sleep=sleeps.append)
+
+    assert record is not None
+    assert record.symbol == "AAPL"
+    assert attempts["count"] == 3
+    # Two retries needed (first two attempts failed) - only their delays.
+    assert sleeps == list(fetcher.RETRY_DELAYS_SECONDS[:2])
 
 
 def test_fetch_one_returns_none_on_invalid_fields() -> None:
@@ -113,7 +138,9 @@ def test_run_fetch_uploads_a_batch_for_successful_symbols(
 ) -> None:
     with patch("yfinance.Ticker") as mock_ticker:
         mock_ticker.return_value.info = _fake_ticker_info()
-        result = fetcher.run_fetch("test-bucket", symbols=["AAPL", "MSFT"])
+        result = fetcher.run_fetch(
+            "test-bucket", symbols=["AAPL", "MSFT"], sleep=lambda _: None
+        )
 
     assert result == {"fetched": 2, "skipped": 0}
     mock_upload.assert_called_once()
@@ -135,7 +162,9 @@ def test_run_fetch_skips_failed_symbols_but_uploads_the_rest(
         return mock
 
     with patch("yfinance.Ticker", side_effect=fake_ticker):
-        result = fetcher.run_fetch("test-bucket", symbols=["AAPL", "BAD"])
+        result = fetcher.run_fetch(
+            "test-bucket", symbols=["AAPL", "BAD"], sleep=lambda _: None
+        )
 
     assert result == {"fetched": 1, "skipped": 1}
     mock_upload.assert_called_once()
@@ -147,4 +176,4 @@ def test_run_fetch_refuses_to_upload_when_everything_fails(
 ) -> None:
     with patch("yfinance.Ticker", side_effect=RuntimeError("boom")):
         with pytest.raises(RuntimeError, match="refusing to upload an empty batch"):
-            fetcher.run_fetch("test-bucket", symbols=["AAPL"])
+            fetcher.run_fetch("test-bucket", symbols=["AAPL"], sleep=lambda _: None)
