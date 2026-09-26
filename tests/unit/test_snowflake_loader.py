@@ -38,6 +38,26 @@ def test_private_key_der_roundtrips_a_real_key() -> None:
     assert reloaded.key_size == 2048
 
 
+def test_private_key_der_accepts_escaped_newlines_from_a_single_line_env_var() -> None:
+    """Regression test: a local .env file cannot reliably hold a real
+    multi-line value, so the documented local setup stores the key as one
+    line with literal "\\n" escapes instead of real newlines."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    escaped_single_line = pem.replace("\n", "\\n")
+
+    der = loader._private_key_der(escaped_single_line, None)
+    reloaded = serialization.load_der_private_key(der, password=None)
+    assert reloaded.key_size == 2048
+
+
 # ---------------------------------------------------------------------------
 # _generate_demo_daily_quote_summary
 # ---------------------------------------------------------------------------

@@ -62,7 +62,16 @@ class Settings(BaseSettings):
         default=5 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024
     )
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    # extra="ignore": the shared repo-root .env also carries credentials for
+    # other consumers that don't go through this Settings model (e.g. the
+    # dashboard's Snowflake connection, read directly from os.environ) -
+    # this model should validate its own known fields, not reject the file
+    # over keys it was never meant to own.
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
 
 def get_settings() -> Settings:

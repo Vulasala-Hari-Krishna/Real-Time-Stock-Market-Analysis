@@ -60,6 +60,13 @@ class LoadStatus:
 def _private_key_der(pem_text: str, passphrase: Optional[str]) -> bytes:
     from cryptography.hazmat.primitives import serialization
 
+    # A local .env file (unlike a GitHub Actions secret) cannot reliably
+    # hold a real multi-line value across every Docker Compose version, so
+    # the documented local setup stores this as one line with literal
+    # "\n" escapes. Un-escaping is always safe even when the value already
+    # has real newlines (a valid PEM body never contains a literal
+    # backslash - it's base64), so this handles both formats.
+    pem_text = pem_text.replace("\\n", "\n")
     password = passphrase.encode("utf-8") if passphrase else None
     key = serialization.load_pem_private_key(
         pem_text.encode("utf-8"), password=password

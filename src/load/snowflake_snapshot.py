@@ -133,9 +133,18 @@ class LoadResult(BaseModel):
 
 
 def _private_key_der(pem_text: str, passphrase: str | None) -> bytes:
-    """Convert a PEM private key to the DER/PKCS8 bytes the connector wants."""
+    """Convert a PEM private key to the DER/PKCS8 bytes the connector wants.
+
+    Un-escapes literal "\\n" sequences first: GitHub Actions secrets and a
+    real multi-line env var both hand this real newlines already, but a
+    single-line-per-value local .env file cannot reliably hold one, so a
+    local run may pass the key with literal backslash-n escapes instead.
+    Always safe to un-escape - a valid PEM body is base64 and never
+    contains a literal backslash.
+    """
     from cryptography.hazmat.primitives import serialization
 
+    pem_text = pem_text.replace("\\n", "\n")
     password = passphrase.encode("utf-8") if passphrase else None
     key = serialization.load_pem_private_key(
         pem_text.encode("utf-8"), password=password
