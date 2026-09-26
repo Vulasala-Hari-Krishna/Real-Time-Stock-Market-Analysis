@@ -40,6 +40,16 @@ variable "schema_name" {
   }
 }
 
+variable "serving_schema_name" {
+  type        = string
+  default     = "SERVING"
+  description = "Schema holding R4's published, queryable snapshot tables - separate from the staging/control schema so dashboards/marts never depend on disposable staging objects."
+  validation {
+    condition     = can(regex("^[A-Z][A-Z0-9_]{0,63}$", var.serving_schema_name))
+    error_message = "Use an uppercase identifier of at most 64 characters."
+  }
+}
+
 variable "warehouse_name" {
   type    = string
   default = "STOCK_MARKET_DEV_WH"
@@ -103,6 +113,15 @@ variable "trust_activation_confirmed" {
   description = "Set true only after activating exact IAM trust on the storage role stack and applying the bootstrap root."
 }
 
+variable "loader_grantee_user" {
+  type        = string
+  description = "Existing Snowflake username to grant the loader role to (the solo trial admin login, for this personal project - not a new identity created here)."
+  validation {
+    condition     = can(regex("^[A-Za-z][A-Za-z0-9_]{0,63}$", var.loader_grantee_user))
+    error_message = "Provide an existing Snowflake username."
+  }
+}
+
 provider "snowflake" {
   organization_name = var.organization_name
   account_name       = var.account_name
@@ -136,9 +155,24 @@ resource "snowflake_schema" "staging" {
   comment  = "Staging tables for completed publish/ snapshot batches."
 }
 
+resource "snowflake_schema" "serving" {
+  database = snowflake_database.ticks.name
+  name     = var.serving_schema_name
+  comment  = "Published, queryable snapshot tables - the loader's transactional publish target (R4)."
+}
+
 resource "snowflake_account_role" "loader" {
   name    = var.loader_role_name
   comment = "Least-privilege loader role; routine sessions must not use ACCOUNTADMIN."
+}
+
+# Without this, the role exists but nothing can assume it - a real gap left
+# over from the original R3 build, caught while preparing R4 (which actually
+# needs to connect as this role). loader_grantee_user references an existing
+# user (this trial's sole admin login), not a new identity created here.
+resource "snowflake_grant_account_role" "loader_to_user" {
+  role_name = snowflake_account_role.loader.name
+  user_name = var.loader_grantee_user
 }
 
 resource "snowflake_grant_privileges_to_account_role" "warehouse_usage" {
@@ -164,6 +198,17 @@ resource "snowflake_grant_privileges_to_account_role" "schema_privileges" {
   privileges        = ["USAGE", "CREATE TABLE", "CREATE STAGE"]
   on_schema {
     schema_name = snowflake_schema.staging.fully_qualified_name
+  }
+}
+
+# CREATE TABLE lets the loader itself run the idempotent CREATE TABLE IF NOT
+# EXISTS DDL in snowflake/sql/ at startup (the loader owns any table it
+# creates, so no further per-table grants are needed for its own DML).
+resource "snowflake_grant_privileges_to_account_role" "serving_schema_privileges" {
+  account_role_name = snowflake_account_role.loader.name
+  privileges        = ["USAGE", "CREATE TABLE"]
+  on_schema {
+    schema_name = snowflake_schema.serving.fully_qualified_name
   }
 }
 
@@ -222,6 +267,10 @@ output "database_name" {
 
 output "schema_name" {
   value = snowflake_schema.staging.name
+}
+
+output "serving_schema_name" {
+  value = snowflake_schema.serving.name
 }
 
 output "loader_role_name" {

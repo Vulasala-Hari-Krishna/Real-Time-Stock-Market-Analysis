@@ -4,12 +4,14 @@ variables {
   bucket                     = "offline-test-bucket"
   database_name              = "PORTFOLIO_DEV"
   schema_name                = "PUBLISH_STAGING"
+  serving_schema_name        = "SERVING"
   warehouse_name              = "PORTFOLIO_DEV_WH"
   loader_role_name           = "PORTFOLIO_DEV_LOADER"
   credit_quota               = 10
   integration_name           = "PORTFOLIO_DEV_PUBLISH_INTEGRATION"
   organization_name          = "ILMRWBU"
   account_name               = "TX52777"
+  loader_grantee_user        = "TESTUSER"
   trust_activation_confirmed = true
 }
 
@@ -65,5 +67,19 @@ run "platform_boundaries" {
   assert {
     condition     = snowflake_stage_external_s3.publish.storage_integration == var.integration_name
     error_message = "The stage must reference the bootstrap root's storage integration."
+  }
+  assert {
+    condition = (
+      snowflake_grant_account_role.loader_to_user.role_name == snowflake_account_role.loader.name &&
+      snowflake_grant_account_role.loader_to_user.user_name == var.loader_grantee_user
+    )
+    error_message = "The loader role must actually be granted to a user, or nothing can assume it."
+  }
+  assert {
+    condition = (
+      snowflake_schema.serving.name == var.serving_schema_name &&
+      toset(snowflake_grant_privileges_to_account_role.serving_schema_privileges.privileges) == toset(["USAGE", "CREATE TABLE"])
+    )
+    error_message = "The loader role must be able to create and use its own serving-table objects in a schema separate from staging."
   }
 }

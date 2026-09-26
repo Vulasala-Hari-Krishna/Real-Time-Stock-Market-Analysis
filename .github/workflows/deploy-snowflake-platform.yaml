@@ -45,6 +45,11 @@ on:
         required: true
         default: 'PUBLISH_STAGING'
         type: string
+      serving_schema_name:
+        description: 'Snowflake serving schema name (R4 loader publish target)'
+        required: true
+        default: 'SERVING'
+        type: string
       warehouse_name:
         description: 'Snowflake warehouse name'
         required: true
@@ -278,12 +283,14 @@ jobs:
             -var="bucket=${{ needs.bootstrap.outputs.data_bucket }}" \
             -var="database_name=${{ inputs.database_name }}" \
             -var="schema_name=${{ inputs.schema_name }}" \
+            -var="serving_schema_name=${{ inputs.serving_schema_name }}" \
             -var="warehouse_name=${{ inputs.warehouse_name }}" \
             -var="loader_role_name=${{ inputs.loader_role_name }}" \
             -var="credit_quota=${{ inputs.credit_quota }}" \
             -var="integration_name=${{ needs.snowflake-bootstrap.outputs.integration_name }}" \
             -var="organization_name=${{ needs.bootstrap.outputs.organization_name }}" \
             -var="account_name=${{ needs.bootstrap.outputs.account_name }}" \
+            -var="loader_grantee_user=${{ secrets.SNOWFLAKE_USER }}" \
             -var="trust_activation_confirmed=true"
 
       - name: Print platform outputs

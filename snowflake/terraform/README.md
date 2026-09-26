@@ -1,5 +1,9 @@
 # Snowflake Platform IaC
 
+See [../README.md](../README.md) for R4, the snapshot loader that consumes
+this platform (`workspace/main.tf` now also creates a `SERVING` schema for
+its published output, added while designing R4 - not yet applied live).
+
 ## Status
 
 Three real live attempts (2026-09-25), each instructive, not yet fully
