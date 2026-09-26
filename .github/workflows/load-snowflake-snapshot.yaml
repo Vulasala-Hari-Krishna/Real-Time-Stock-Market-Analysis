@@ -1,0 +1,143 @@
+name: Load Snowflake Snapshot
+
+# R4: loads the latest completed gold snapshot batch (published by
+# export-gold-snapshot.yaml) into Snowflake, per the Snapshot Load Contract
+# in .github/instructions/snowflake.instructions.md
+# (src/load/snowflake_snapshot.py). Authenticates as the least-privilege
+# loader role created by the Snowflake workspace Terraform root - never
+# ACCOUNTADMIN - using the same key-pair (JWT) credentials that root uses.
+#
+# Reads the workspace root's already-applied Terraform state for the
+# warehouse/database/schema/role/stage names (no manual copying, same
+# pattern as deploy-databricks-job.yaml reading bundle_variables) rather
+# than re-typing them as separate inputs that could drift from what
+# deploy-snowflake-platform.yaml actually created.
+#
+# Prerequisites: deploy-snowflake-platform.yaml and export-gold-snapshot.yaml
+# have already run successfully in the same environment/region. Needs repo
+# secrets AWS_DEPLOY_ROLE_ARN, SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER,
+# SNOWFLAKE_PRIVATE_KEY (all already used by deploy-snowflake-platform.yaml).
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      aws-region:
+        description: 'AWS region (must match the Snowflake platform deploy)'
+        required: true
+        default: 'us-east-2'
+        type: string
+      dataset:
+        description: 'Registered dataset name to load (see DATASET_COLUMNS)'
+        required: true
+        default: 'daily_quote_summary'
+        type: string
+      batch_id:
+        description: 'Explicit batch ID (leave blank to load the latest completed batch)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+  SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+
+jobs:
+  load:
+    name: Load Latest Snapshot Batch
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Read Terraform state backend outputs (stack 00)
+        id: state
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformStateBucketName'].OutputValue" --output text)
+          TABLE=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformLockTableName'].OutputValue" --output text)
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "table=${TABLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Read Snowflake workspace platform outputs (already applied)
+        id: platform
+        working-directory: snowflake/terraform/workspace
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ steps.state.outputs.bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ steps.state.outputs.table }}"
+          echo "database=$(terraform output -raw database_name)" >> "$GITHUB_OUTPUT"
+          echo "staging_schema=$(terraform output -raw schema_name)" >> "$GITHUB_OUTPUT"
+          echo "serving_schema=$(terraform output -raw serving_schema_name)" >> "$GITHUB_OUTPUT"
+          echo "warehouse=$(terraform output -raw warehouse_name)" >> "$GITHUB_OUTPUT"
+          echo "role=$(terraform output -raw loader_role_name)" >> "$GITHUB_OUTPUT"
+          echo "stage=$(terraform output -raw stage_name)" >> "$GITHUB_OUTPUT"
+
+      - name: Read project data-lake bucket name (requires stack 01 already deployed)
+        id: databucket
+        run: |
+          NAME=$(aws cloudformation list-exports --region "${{ inputs.aws-region }}" \
+            --query "Exports[?Name=='stock-market-pipeline-${{ inputs.environment }}-DataLakeBucketName'].Value" \
+            --output text)
+          if [ -z "${NAME}" ]; then
+            echo "ERROR: stack 01 (S3 datalake) export not found in ${{ inputs.aws-region }}." >&2
+            exit 1
+          fi
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Snowflake snapshot loader
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          BATCH_ID: ${{ inputs.batch_id }}
+        run: |
+          ARGS=(
+            --account "${SNOWFLAKE_ACCOUNT}"
+            --user "${SNOWFLAKE_USER}"
+            --role "${{ steps.platform.outputs.role }}"
+            --warehouse "${{ steps.platform.outputs.warehouse }}"
+            --database "${{ steps.platform.outputs.database }}"
+            --staging-schema "${{ steps.platform.outputs.staging_schema }}"
+            --serving-schema "${{ steps.platform.outputs.serving_schema }}"
+            --stage-name "${{ steps.platform.outputs.stage }}"
+            --bucket "${{ steps.databucket.outputs.name }}"
+            --dataset "${{ inputs.dataset }}"
+          )
+          if [ -n "${BATCH_ID}" ]; then
+            ARGS+=(--batch-id "${BATCH_ID}")
+          fi
+          python -m src.load.snowflake_snapshot "${ARGS[@]}"

@@ -1,17 +1,22 @@
 name: Deploy Snowflake Platform
 
-# Automates the Snowflake platform bootstrap: CloudFormation stack 07 (deny-
-# all IAM role) -> Terraform apply #1 (storage integration + warehouse/
-# database/schema/role/grants; the external stage is gated behind trust and
-# fails its precondition on this pass, by design) -> reads the storage
-# integration's generated IAM user ARN/external ID -> re-deploys stack 07
-# with real trust -> Terraform apply #2 (now the stage + its grant succeed).
-# Same remote-state S3 backend as the Databricks roots (stack 00), same
-# job-output-passing pattern - no manual value copying between steps.
+# Automates the Snowflake platform bootstrap across two Terraform roots
+# (mirrors the Databricks credential/workspace split, for the same reason):
+# CloudFormation stack 07 (deny-all IAM role) -> apply the `bootstrap` root
+# (storage integration only - nothing gated, always safe to apply) -> read
+# its generated IAM user ARN/external ID -> re-deploy stack 07 with real
+# trust -> apply the `workspace` root (warehouse/database/schema/role/
+# grants/stage; applied exactly once, only now that trust is real).
 #
-# Prerequisites: stacks 00 and 01 already deployed (00 via
-# deploy-databricks-platform.yaml, 01 via deploy-infra.yaml). Needs repo
-# secrets AWS_DEPLOY_ROLE_ARN (existing), SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER,
+# This two-root split exists because a Terraform lifecycle.precondition
+# failure blocks an ENTIRE plan/apply, not just the gated resource -
+# confirmed live 2026-09-25 after an earlier single-root design tried to
+# gate only the stage and found nothing got created at all. Same remote-
+# state S3 backend as the Databricks roots (stack 00), same job-output-
+# passing pattern - no manual value copying between steps.
+#
+# Prerequisites: stacks 00 and 01 already deployed. Needs repo secrets
+# AWS_DEPLOY_ROLE_ARN (existing), SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER,
 # SNOWFLAKE_PRIVATE_KEY.
 
 on:
@@ -40,6 +45,11 @@ on:
         required: true
         default: 'PUBLISH_STAGING'
         type: string
+      serving_schema_name:
+        description: 'Snowflake serving schema name (R4 loader publish target)'
+        required: true
+        default: 'SERVING'
+        type: string
       warehouse_name:
         description: 'Snowflake warehouse name'
         required: true
@@ -49,6 +59,11 @@ on:
         description: 'Least-privilege Snowflake role for routine loads'
         required: true
         default: 'STOCK_MARKET_DEV_LOADER'
+        type: string
+      integration_name:
+        description: 'Snowflake storage integration name'
+        required: true
+        default: 'STOCK_MARKET_DEV_PUBLISH_INTEGRATION'
         type: string
       credit_quota:
         description: 'Resource monitor credit quota (max 25)'
@@ -61,7 +76,6 @@ permissions:
   contents: read
 
 env:
-  SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
   SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
   SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
 
@@ -75,6 +89,8 @@ jobs:
       lock_table: ${{ steps.state.outputs.table }}
       storage_role_arn: ${{ steps.role.outputs.arn }}
       data_bucket: ${{ steps.databucket.outputs.name }}
+      organization_name: ${{ steps.snowflake_account.outputs.organization_name }}
+      account_name: ${{ steps.snowflake_account.outputs.account_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -83,6 +99,21 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ inputs.aws-region }}
+
+      - name: Split SNOWFLAKE_ACCOUNT into organization_name/account_name
+        id: snowflake_account
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+        run: |
+          # Provider 2.x does not read SNOWFLAKE_ACCOUNT (confirmed live: it
+          # warns "environment variable is ignored" and requires an opt-in
+          # experiment); organization_name/account_name must be passed
+          # explicitly instead. These aren't secrets - just split from the
+          # existing SNOWFLAKE_ACCOUNT secret so no new secret is needed.
+          ORG="${SNOWFLAKE_ACCOUNT%%-*}"
+          ACCT="${SNOWFLAKE_ACCOUNT#*-}"
+          echo "organization_name=${ORG}" >> "$GITHUB_OUTPUT"
+          echo "account_name=${ACCT}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy Terraform state backend (stack 00, idempotent)
         run: |
@@ -142,14 +173,15 @@ jobs:
           fi
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
 
-  platform-bootstrap:
-    name: 'Terraform apply #1 (integration + warehouse/db/schema/role; stage intentionally blocked)'
+  snowflake-bootstrap:
+    name: 'Terraform: bootstrap root (storage integration)'
     runs-on: ubuntu-latest
     needs: bootstrap
     environment: ${{ inputs.environment }}
     outputs:
       iam_principal_arn: ${{ steps.outputs.outputs.iam_principal_arn }}
       external_id: ${{ steps.outputs.outputs.external_id }}
+      integration_name: ${{ steps.outputs.outputs.integration_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -164,48 +196,35 @@ jobs:
           terraform_version: '1.9.8'
 
       - name: Terraform init (remote state)
-        working-directory: snowflake/terraform
+        working-directory: snowflake/terraform/bootstrap
         run: |
           terraform init -input=false \
             -backend-config="bucket=${{ needs.bootstrap.outputs.state_bucket }}" \
             -backend-config="region=${{ inputs.aws-region }}" \
             -backend-config="dynamodb_table=${{ needs.bootstrap.outputs.lock_table }}"
 
-      - name: Terraform apply (trust_activation_confirmed=false; stage precondition expected to fail)
-        id: apply
-        working-directory: snowflake/terraform
-        continue-on-error: true
+      - name: Terraform apply
+        working-directory: snowflake/terraform/bootstrap
         run: |
           terraform apply -input=false -auto-approve \
             -var="bucket=${{ needs.bootstrap.outputs.data_bucket }}" \
             -var="storage_role_arn=${{ needs.bootstrap.outputs.storage_role_arn }}" \
-            -var="database_name=${{ inputs.database_name }}" \
-            -var="schema_name=${{ inputs.schema_name }}" \
-            -var="warehouse_name=${{ inputs.warehouse_name }}" \
-            -var="loader_role_name=${{ inputs.loader_role_name }}" \
-            -var="credit_quota=${{ inputs.credit_quota }}" \
-            -var="trust_activation_confirmed=false"
+            -var="integration_name=${{ inputs.integration_name }}" \
+            -var="organization_name=${{ needs.bootstrap.outputs.organization_name }}" \
+            -var="account_name=${{ needs.bootstrap.outputs.account_name }}"
 
       - name: Capture generated IAM trust values
         id: outputs
-        working-directory: snowflake/terraform
+        working-directory: snowflake/terraform/bootstrap
         run: |
-          echo ">>> Previous apply outcome: ${{ steps.apply.outcome }} (failure here is expected -"
-          echo ">>> the stage's precondition blocks it deliberately until trust is activated)."
-          PRINCIPAL=$(terraform output -raw iam_principal_arn)
-          EXTERNAL=$(terraform output -raw external_id)
-          if [ -z "${PRINCIPAL}" ] || [ -z "${EXTERNAL}" ]; then
-            echo "ERROR: storage integration outputs are empty - a resource other than" >&2
-            echo "the gated stage failed. Check the apply log above before continuing." >&2
-            exit 1
-          fi
-          echo "iam_principal_arn=${PRINCIPAL}" >> "$GITHUB_OUTPUT"
-          echo "external_id=${EXTERNAL}" >> "$GITHUB_OUTPUT"
+          echo "iam_principal_arn=$(terraform output -raw iam_principal_arn)" >> "$GITHUB_OUTPUT"
+          echo "external_id=$(terraform output -raw external_id)" >> "$GITHUB_OUTPUT"
+          echo "integration_name=$(terraform output -raw integration_name)" >> "$GITHUB_OUTPUT"
 
   activate-trust:
     name: Activate Snowflake IAM Trust (07, second phase)
     runs-on: ubuntu-latest
-    needs: [bootstrap, platform-bootstrap]
+    needs: [bootstrap, snowflake-bootstrap]
     environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
@@ -225,16 +244,16 @@ jobs:
               "Environment=${{ inputs.environment }}" \
               "ProjectName=stock-market-pipeline" \
               "EnableSnowflakeTrust=true" \
-              "SnowflakeIamUserArn=${{ needs.platform-bootstrap.outputs.iam_principal_arn }}" \
-              "SnowflakeExternalId=${{ needs.platform-bootstrap.outputs.external_id }}" \
+              "SnowflakeIamUserArn=${{ needs.snowflake-bootstrap.outputs.iam_principal_arn }}" \
+              "SnowflakeExternalId=${{ needs.snowflake-bootstrap.outputs.external_id }}" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "${{ inputs.aws-region }}" \
             --no-fail-on-empty-changeset
 
-  platform-finish:
-    name: 'Terraform apply #2 (external stage, now trust-activated)'
+  snowflake-workspace:
+    name: 'Terraform: workspace root (warehouse/db/schema/role/stage)'
     runs-on: ubuntu-latest
-    needs: [bootstrap, activate-trust]
+    needs: [bootstrap, snowflake-bootstrap, activate-trust]
     environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
@@ -250,7 +269,7 @@ jobs:
           terraform_version: '1.9.8'
 
       - name: Terraform init (remote state)
-        working-directory: snowflake/terraform
+        working-directory: snowflake/terraform/workspace
         run: |
           terraform init -input=false \
             -backend-config="bucket=${{ needs.bootstrap.outputs.state_bucket }}" \
@@ -258,18 +277,22 @@ jobs:
             -backend-config="dynamodb_table=${{ needs.bootstrap.outputs.lock_table }}"
 
       - name: Terraform apply (trust_activation_confirmed=true)
-        working-directory: snowflake/terraform
+        working-directory: snowflake/terraform/workspace
         run: |
           terraform apply -input=false -auto-approve \
             -var="bucket=${{ needs.bootstrap.outputs.data_bucket }}" \
-            -var="storage_role_arn=${{ needs.bootstrap.outputs.storage_role_arn }}" \
             -var="database_name=${{ inputs.database_name }}" \
             -var="schema_name=${{ inputs.schema_name }}" \
+            -var="serving_schema_name=${{ inputs.serving_schema_name }}" \
             -var="warehouse_name=${{ inputs.warehouse_name }}" \
             -var="loader_role_name=${{ inputs.loader_role_name }}" \
             -var="credit_quota=${{ inputs.credit_quota }}" \
+            -var="integration_name=${{ needs.snowflake-bootstrap.outputs.integration_name }}" \
+            -var="organization_name=${{ needs.bootstrap.outputs.organization_name }}" \
+            -var="account_name=${{ needs.bootstrap.outputs.account_name }}" \
+            -var="loader_grantee_user=${{ secrets.SNOWFLAKE_USER }}" \
             -var="trust_activation_confirmed=true"
 
       - name: Print platform outputs
-        working-directory: snowflake/terraform
+        working-directory: snowflake/terraform/workspace
         run: terraform output -json
