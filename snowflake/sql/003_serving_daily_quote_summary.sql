@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS {database}.{serving_schema}.DAILY_QUOTE_SUMMARY (
     first_quote_at         TIMESTAMP_NTZ,
     last_quote_at          TIMESTAMP_NTZ,
     observed_change_pct    DOUBLE,
+    bronze_version         NUMBER(38, 0),
     loaded_batch_id        VARCHAR NOT NULL,
     loaded_at              TIMESTAMP_NTZ NOT NULL,
     CONSTRAINT daily_quote_summary_pk PRIMARY KEY (provider, symbol, capture_date_utc)

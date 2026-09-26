@@ -226,6 +226,17 @@ def test_validate_expected_schema_passes_for_registered_dataset() -> None:
     loader.validate_expected_schema(entry, "daily_quote_summary")
 
 
+def test_validate_expected_schema_includes_bronze_version_lineage_column() -> None:
+    """Regression test: a real live manifest (2026-09-26) included
+    bronze_version - appended after summarize_quotes() by
+    databricks_ticks.py::rebuild_outputs - and this loader's registry didn't
+    account for it, rejecting every real batch as schema drift. Guards
+    against silently dropping this column from DATASET_COLUMNS again."""
+    assert ("bronze_version", "NUMBER(38,0)") in loader.DATASET_COLUMNS[
+        "daily_quote_summary"
+    ]
+
+
 def test_validate_expected_schema_rejects_column_drift() -> None:
     _, entry = _manifest_entry()
     entry.columns = entry.columns[:-1]  # drop one expected column

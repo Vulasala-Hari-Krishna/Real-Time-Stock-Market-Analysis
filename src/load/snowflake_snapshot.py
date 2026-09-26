@@ -84,6 +84,11 @@ DATASET_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("first_quote_at", "TIMESTAMP_NTZ"),
         ("last_quote_at", "TIMESTAMP_NTZ"),
         ("observed_change_pct", "DOUBLE"),
+        # Lineage column appended after summarize_quotes() by
+        # databricks_ticks.py::rebuild_outputs (F.lit(bronze_version)) -
+        # confirmed live 2026-09-26 when a real manifest included it and
+        # this registry (hand-derived from summarize_quotes alone) didn't.
+        ("bronze_version", "NUMBER(38,0)"),
     ),
 }
 
