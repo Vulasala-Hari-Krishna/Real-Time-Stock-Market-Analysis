@@ -48,6 +48,33 @@ The runner is [databricks_ticks.py](../src/batch/databricks_ticks.py); reusable
 transformations are in [landed_ticks.py](../src/batch/landed_ticks.py).
 The [foundation contract](../docs/hybrid-migration.md) defines raw transport fields.
 
+## Fundamentals Slice (R6)
+
+A second, independent job in the same bundle - `landed_fundamentals` - migrates
+the legacy `fundamental_enrichment.py` product. No Kafka transport layer to
+preserve here; a local fetcher lands a periodic whole-watchlist snapshot instead
+of a continuous stream:
+
+```text
+landing/fundamentals/**/*.json.gz  (src/producers/fundamentals_fetcher.py)
+    -> Auto Loader text ingestion, AvailableNow
+    -> <catalog>.<prefix>_bronze.fundamentals_raw
+    -> FundamentalData validation + latest-per-symbol ranking
+    -> <catalog>.<prefix>_gold.fundamentals            (one row per symbol)
+    |-> <catalog>.<prefix>_silver.fundamentals_quarantine
+    |-> <catalog>.<prefix>_gold.fundamentals_pipeline_state
+```
+
+The runner is [databricks_fundamentals.py](../src/batch/databricks_fundamentals.py);
+reusable transformations are in
+[landed_fundamentals.py](../src/batch/landed_fundamentals.py). See the
+[Fundamentals Snapshot Contract](../docs/hybrid-migration.md#fundamentals-snapshot-contract-r6)
+for the full data contract, including why the `landing` external location was
+broadened from `landing/ticks` to the `landing` parent prefix.
+[deploy-databricks-fundamentals-job.yaml](../.github/workflows/deploy-databricks-fundamentals-job.yaml)
+deploys/runs it the same way `deploy-databricks-job.yaml` proved for
+`landed_ticks`; not yet run against a live workspace.
+
 ## Data Semantics
 
 - Bronze appends original NDJSON lines, file path/modification time, and bronze

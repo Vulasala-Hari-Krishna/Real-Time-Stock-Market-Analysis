@@ -122,6 +122,28 @@ variable "loader_grantee_user" {
   }
 }
 
+variable "reader_role_name" {
+  type        = string
+  default     = "STOCK_MARKET_DEV_READER"
+  description = "Read-only role for R5 (the Streamlit historical view) - deliberately separate from the loader role: dashboards must never hold CREATE TABLE/staging privileges."
+  validation {
+    condition = (
+      can(regex("^[A-Z][A-Z0-9_]{0,63}$", var.reader_role_name)) &&
+      !contains(["ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN", "USERADMIN", "PUBLIC"], var.reader_role_name)
+    )
+    error_message = "Use a dedicated non-admin role identifier, not a built-in Snowflake role."
+  }
+}
+
+variable "reader_grantee_user" {
+  type        = string
+  description = "Existing Snowflake username to grant the read-only reader role to (this personal project's one trial login, same as loader_grantee_user - assumes a different, read-only role for dashboard sessions)."
+  validation {
+    condition     = can(regex("^[A-Za-z][A-Za-z0-9_]{0,63}$", var.reader_grantee_user))
+    error_message = "Provide an existing Snowflake username."
+  }
+}
+
 provider "snowflake" {
   organization_name = var.organization_name
   account_name       = var.account_name
@@ -212,6 +234,74 @@ resource "snowflake_grant_privileges_to_account_role" "serving_schema_privileges
   }
 }
 
+# Read-only role for R5 (the Streamlit historical view) - deliberately
+# separate from the loader role, per the Snapshot Load Contract's
+# role-separation requirement ("role-separated loader, transformer, and
+# dashboard access, not ACCOUNTADMIN for application sessions"). This role
+# never touches PUBLISH_STAGING or the stage; it can only SELECT from
+# SERVING.
+resource "snowflake_account_role" "reader" {
+  name    = var.reader_role_name
+  comment = "Read-only role for dashboard/analytics sessions; SELECT-only on SERVING, no write/staging privileges."
+}
+
+resource "snowflake_grant_account_role" "reader_to_user" {
+  role_name = snowflake_account_role.reader.name
+  user_name = var.reader_grantee_user
+}
+
+resource "snowflake_grant_privileges_to_account_role" "reader_warehouse_usage" {
+  account_role_name = snowflake_account_role.reader.name
+  privileges        = ["USAGE"]
+  on_account_object {
+    object_type = "WAREHOUSE"
+    object_name = snowflake_warehouse.ticks.name
+  }
+}
+
+resource "snowflake_grant_privileges_to_account_role" "reader_database_usage" {
+  account_role_name = snowflake_account_role.reader.name
+  privileges        = ["USAGE"]
+  on_account_object {
+    object_type = "DATABASE"
+    object_name = snowflake_database.ticks.name
+  }
+}
+
+resource "snowflake_grant_privileges_to_account_role" "reader_serving_schema_usage" {
+  account_role_name = snowflake_account_role.reader.name
+  privileges        = ["USAGE"]
+  on_schema {
+    schema_name = snowflake_schema.serving.fully_qualified_name
+  }
+}
+
+# SELECT on existing SERVING tables, plus future ones, so a new published
+# dataset doesn't need a Terraform change to become dashboard-readable.
+# on_schema_object all/future block (object_type_plural + in_schema)
+# confirmed against the provider's own docs before writing, not guessed.
+resource "snowflake_grant_privileges_to_account_role" "reader_serving_select_existing" {
+  account_role_name = snowflake_account_role.reader.name
+  privileges        = ["SELECT"]
+  on_schema_object {
+    all {
+      object_type_plural = "TABLES"
+      in_schema           = snowflake_schema.serving.fully_qualified_name
+    }
+  }
+}
+
+resource "snowflake_grant_privileges_to_account_role" "reader_serving_select_future" {
+  account_role_name = snowflake_account_role.reader.name
+  privileges        = ["SELECT"]
+  on_schema_object {
+    future {
+      object_type_plural = "TABLES"
+      in_schema           = snowflake_schema.serving.fully_qualified_name
+    }
+  }
+}
+
 # This root is applied exactly once, only after the bootstrap root has run
 # and CloudFormation trust is real - so this precondition never actually
 # blocks anything in ordinary use. Kept anyway as a defensive guard against
@@ -275,6 +365,10 @@ output "serving_schema_name" {
 
 output "loader_role_name" {
   value = snowflake_account_role.loader.name
+}
+
+output "reader_role_name" {
+  value = snowflake_account_role.reader.name
 }
 
 output "stage_name" {

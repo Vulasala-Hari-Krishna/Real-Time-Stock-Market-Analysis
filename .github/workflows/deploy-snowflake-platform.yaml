@@ -60,6 +60,11 @@ on:
         required: true
         default: 'STOCK_MARKET_DEV_LOADER'
         type: string
+      reader_role_name:
+        description: 'Read-only Snowflake role for dashboard/analytics sessions (R5)'
+        required: true
+        default: 'STOCK_MARKET_DEV_READER'
+        type: string
       integration_name:
         description: 'Snowflake storage integration name'
         required: true
@@ -286,6 +291,8 @@ jobs:
             -var="serving_schema_name=${{ inputs.serving_schema_name }}" \
             -var="warehouse_name=${{ inputs.warehouse_name }}" \
             -var="loader_role_name=${{ inputs.loader_role_name }}" \
+            -var="reader_role_name=${{ inputs.reader_role_name }}" \
+            -var="reader_grantee_user=${{ secrets.SNOWFLAKE_USER }}" \
             -var="credit_quota=${{ inputs.credit_quota }}" \
             -var="integration_name=${{ needs.snowflake-bootstrap.outputs.integration_name }}" \
             -var="organization_name=${{ needs.bootstrap.outputs.organization_name }}" \

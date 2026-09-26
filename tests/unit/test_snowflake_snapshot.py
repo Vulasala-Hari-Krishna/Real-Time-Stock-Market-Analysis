@@ -161,6 +161,26 @@ def test_private_key_der_supports_a_passphrase() -> None:
     serialization.load_der_private_key(der, password=None)
 
 
+def test_private_key_der_accepts_escaped_newlines_from_a_single_line_env_var() -> None:
+    """Regression test: a local .env file cannot reliably hold a real
+    multi-line value, so a local run may pass this as one line with
+    literal "\\n" escapes instead of real newlines."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    escaped_single_line = pem.replace("\n", "\\n")
+
+    der = loader._private_key_der(escaped_single_line, None)
+    reloaded = serialization.load_der_private_key(der, password=None)
+    assert reloaded.key_size == 2048
+
+
 # ---------------------------------------------------------------------------
 # find_latest_batch_id
 # ---------------------------------------------------------------------------
@@ -224,6 +244,17 @@ def test_load_manifest_rejects_non_completed_status(mock_get_client: MagicMock) 
 def test_validate_expected_schema_passes_for_registered_dataset() -> None:
     _, entry = _manifest_entry()
     loader.validate_expected_schema(entry, "daily_quote_summary")
+
+
+def test_validate_expected_schema_includes_bronze_version_lineage_column() -> None:
+    """Regression test: a real live manifest (2026-09-26) included
+    bronze_version - appended after summarize_quotes() by
+    databricks_ticks.py::rebuild_outputs - and this loader's registry didn't
+    account for it, rejecting every real batch as schema drift. Guards
+    against silently dropping this column from DATASET_COLUMNS again."""
+    assert ("bronze_version", "NUMBER(38,0)") in loader.DATASET_COLUMNS[
+        "daily_quote_summary"
+    ]
 
 
 def test_validate_expected_schema_rejects_column_drift() -> None:

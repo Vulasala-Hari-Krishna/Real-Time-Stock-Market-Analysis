@@ -11,6 +11,7 @@ dependencies = ["pydantic==2.6.4"]
 
 [project.scripts]
 landed_ticks = "src.batch.databricks_ticks:main"
+landed_fundamentals = "src.batch.databricks_fundamentals:main"
 
 [tool.setuptools]
 package-dir = {"" = ".."}

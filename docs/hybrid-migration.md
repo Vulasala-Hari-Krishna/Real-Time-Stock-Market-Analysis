@@ -224,6 +224,43 @@ and executable manifest validation before implementing either producer or loader
 CDC, Snowpipe, and Streams/Tasks are a later explicit phase with their own
 bootstrap, ordering, tombstone, retention, and recovery contract.
 
+## Fundamentals Snapshot Contract (R6)
+
+R6's first migrated legacy product (`fundamental_enrichment.py`). Unlike ticks,
+fundamentals have no Kafka transport layer to preserve - a local fetcher
+(`src/producers/fundamentals_fetcher.py`) periodically snapshots the whole
+watchlist from yfinance and lands one immutable, content-addressed NDJSON batch
+to `landing/fundamentals/extraction_id=<id>/fundamentals.json.gz`. Each line is
+one symbol's `FundamentalData` fields (`src/common/schemas.py`) plus the
+`extraction_id` for bronze lineage - the same canonical model the legacy Spark
+job already validated against, not a new contract invented from scratch.
+
+Databricks (`src/batch/databricks_fundamentals.py`, mirroring
+`databricks_ticks.py`'s bronze/silver/gold/state pattern) ingests via Auto
+Loader into `fundamentals_raw`, re-validates independently (never trusts the
+landed JSON blindly), and classifies each row as `accepted` (the latest valid
+snapshot per symbol), `superseded` (an older valid snapshot for a symbol that
+was re-fetched later - an expected refresh, not a data-quality conflict, so
+never quarantined), or `quarantined` (invalid). Gold `fundamentals` is the
+`accepted` rows only - one row per symbol, the latest known snapshot, not a
+time series. Business key is `(symbol)` alone.
+
+Publishes through the same Gold Snapshot Contract v1 exporter
+(`DATASET_BUSINESS_KEYS["fundamentals"] = ("symbol",)`,
+`DATASET_CUTOFF_COLUMN["fundamentals"] = "retrieved_at"` in
+`src/export/gold_snapshot.py`) and the same Snowflake Snapshot Load Contract
+loader (`src/load/snowflake_snapshot.py`, its own staging/serving DDL in
+`snowflake/sql/004_staging_fundamentals.sql` /
+`005_serving_fundamentals.sql`) - both were built generic across datasets in
+R2/R4 specifically so a second product would not need a redesign, only a
+registry entry each.
+
+The Unity Catalog `landing` external location was broadened from
+`landing/ticks` to the `landing` parent prefix to cover
+`landing/fundamentals/` (and any future `landing/<dataset>/`) without a new
+external location per dataset - it stays read-only (`READ_FILES` only), so
+this widens what Databricks can *read*, never what it can write.
+
 ## Access and IaC Ownership
 
 The optional [hybrid access template](../cloudformation/05-hybrid-access.yaml)
