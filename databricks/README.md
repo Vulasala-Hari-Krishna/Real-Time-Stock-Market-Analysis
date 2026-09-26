@@ -226,11 +226,97 @@ No schedule or file-arrival trigger is defined. Run a small landed fixture first
 inspect quarantine reasons and completion state, reconcile values, rerun unchanged
 input, then exercise failure/retry before connecting downstream systems.
 
+## Historical OHLCV Slice (R6)
+
+A third job in the same bundle - `landed_historical` - migrates
+`historical_backfill.py`'s distinct capability (`tick_rollup.py`'s role is
+already served by R1's `daily_quote_summary`, not re-implemented here). Same
+direct-fetch design as fundamentals - no S3 landing, yfinance called
+directly from the job, every run a new observation with no idempotency skip:
+
+```text
+yfinance (direct fetch, src/batch/landed_historical.py::fetch_all_history)
+    -> <catalog>.<prefix>_bronze.historical_ohlcv_raw  (append-only across runs)
+    -> latest-fetched-wins ranking per (symbol, date) across all bronze history
+    -> <catalog>.<prefix>_gold.historical_ohlcv        (one row per symbol/date)
+    |-> <catalog>.<prefix>_gold.historical_pipeline_state
+```
+
+The runner is [databricks_historical.py](../src/batch/databricks_historical.py);
+reusable fetch/transform logic is in
+[landed_historical.py](../src/batch/landed_historical.py). See the
+[Historical OHLCV Contract](../docs/hybrid-migration.md#historical-ohlcv-contract-r6-second-migrated-product).
+
+## Indicators/Signals/Sector/Correlations Slice (R6)
+
+A fourth job - `landed_indicators` - migrates `daily_aggregation.py` by
+**reusing its transform functions directly** (`compute_daily_summaries`,
+`compute_sector_performance`, `compute_correlation_matrix` - pure DataFrame
+transforms, already real-Spark-tested by the legacy job's own test suite;
+porting means importing, not re-implementing). Unlike every other job here,
+it has no fetch/bronze stage of its own - its input is `landed_historical`'s
+already-published gold table, read at a pinned version, fully recomputed
+every run (the legacy job's incremental MERGE mode is dropped for the same
+"always rebuild" simplicity used throughout this migration):
+
+```text
+<catalog>.<prefix>_gold.historical_ohlcv (pinned version, read-only input)
+    -> compute_daily_summaries / compute_sector_performance / compute_correlation_matrix
+    -> <catalog>.<prefix>_gold.daily_summaries
+    -> <catalog>.<prefix>_gold.sector_performance
+    -> <catalog>.<prefix>_gold.correlations
+    |-> <catalog>.<prefix>_gold.indicators_pipeline_state
+```
+
+The runner is [databricks_indicators.py](../src/batch/databricks_indicators.py).
+See the
+[Indicators Contract](../docs/hybrid-migration.md#indicatorssignalssectorcorrelations-contract-r6-third-migrated-product).
+
+Both jobs deploy via the same shared `databricks bundle deploy` used for
+every job in this bundle (see
+[deploy-databricks-job.yaml](../.github/workflows/deploy-databricks-job.yaml) -
+infra-deploy only, no run; see its header comment for why). Neither has run
+against a live workspace yet.
+
+## Delta Table Maintenance
+
+No direct `delta_maintenance.py` port exists - it's replaced by a dedicated
+`maintain_delta_tables` job (`src/batch/databricks_maintenance.py`) that runs
+`OPTIMIZE` then `VACUUM RETAIN 168 HOURS` (Delta's own 7-day safety floor,
+never bypassed) across every table owned by every job (ticks, fundamentals,
+historical, indicators), gathered from each job's own `TABLES` registry so a
+new table is picked up automatically.
+
+Every `write_snapshot`/`append_bronze` call across all four business jobs
+also sets `delta.autoOptimize.optimizeWrite`/`autoCompact` table properties
+(`src/batch/databricks_common.py`), which compacts small files during/after
+writes. That handles ongoing small-file compaction, but it does **not**
+replace `VACUUM`: every overwrite leaves the *previous* version's now-stale
+Parquet files on disk, and only `VACUUM` deletes them once they age past the
+retention window. This is real storage cost that accumulates with every run
+regardless of data volume - matching how production Delta pipelines are run
+is the goal here, not skipping maintenance because this is a personal-scale
+project. (Predictive Optimization, Unity Catalog's own automatic
+`OPTIMIZE`/`VACUUM`, may also apply, but whether it covers **external**
+tables and whether it's available on Free Edition is unverified.)
+
+`maintain_delta_tables` is the one job in this bundle that runs on a native
+Databricks **schedule** (`databricks.yml`'s `maintenance_cron` variable,
+default 03:00 UTC daily) rather than being manually triggered - every other
+job here processes/publishes business data and is deliberately left
+unscheduled per this project's GitHub-Actions/human-trigger boundary; table
+maintenance has no such data-correctness dependency. The schedule ships with
+`pause_status: PAUSED` (the `maintenance_schedule_status` bundle variable) so
+a plain `bundle deploy` only creates the schedule's definition and never
+silently starts it firing - flipping it to `UNPAUSED` is a separate,
+deliberate action, not the default.
+
 ## Pause and Destroy
 
 After a demo, confirm the job has finished or cancel its active run in Databricks
 and verify job compute terminates. Local Docker/AWS teardown does not stop it.
-Do not run OPTIMIZE/VACUUM/maintenance schedules just for this slice.
+Confirm `maintain_delta_tables`'s schedule is still `PAUSED` (its default) before
+tearing down or walking away from this slice - do not unpause it just for a demo.
 
 For explicitly authorized permanent cleanup, cancel active runs before
 `databricks bundle destroy -t dev`. Bundle destruction removes deployed job/assets;

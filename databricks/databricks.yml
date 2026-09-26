@@ -9,6 +9,18 @@ variables:
     default: stocks
   bucket:
     description: Existing S3 bucket with governed landing/lakehouse/checkpoint access
+  maintenance_cron:
+    description: Quartz cron expression for scheduled OPTIMIZE+VACUUM (default 03:00 UTC daily, off-peak for a personal single-user account)
+    default: "0 0 3 * * ?"
+  maintenance_schedule_status:
+    description: >-
+      PAUSED (default) or UNPAUSED. Ships PAUSED deliberately: a plain
+      `bundle deploy` must never silently start a live recurring cron job -
+      the Databricks Terraform provider docs confirm pause_status defaults
+      to UNPAUSED if omitted, so this is set explicitly, not left implicit.
+      Flip to UNPAUSED only as its own deliberate action once you want
+      scheduled maintenance actually running.
+    default: "PAUSED"
 
 # No `run_as`: the job runs as whoever deploys it (the current default when
 # `run_as` is omitted). Setting `run_as: service_principal_name` to the
@@ -101,6 +113,113 @@ resources:
             dependencies:
               - ./dist/*.whl
               - yfinance==0.2.36
+
+    landed_historical:
+      name: stock-market-hybrid-${bundle.target}-landed-historical
+      description: Manual direct-fetch (yfinance) multi-year OHLCV backfill and latest-per-(symbol,date) snapshot (serverless compute, R6)
+      max_concurrent_runs: 1
+      # 10 symbols x up to 5 years of daily bars, with retry/backoff and
+      # inter-symbol spacing, can take a while even when yfinance is healthy.
+      timeout_seconds: 2700
+      queue:
+        enabled: false
+      tasks:
+        - task_key: fetch_and_rebuild_historical
+          environment_key: historical_env
+          timeout_seconds: 2700
+          max_retries: 0
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: stock_market_hybrid
+            entry_point: landed_historical
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema-prefix
+              - ${var.schema_prefix}
+              - --bucket
+              - ${var.bucket}
+      environments:
+        - environment_key: historical_env
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ./dist/*.whl
+              - yfinance==0.2.36
+
+    landed_indicators:
+      name: stock-market-hybrid-${bundle.target}-landed-indicators
+      description: Full-rebuild indicators/signals/sector-performance/correlations from landed_historical's gold table (serverless compute, R6)
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+      queue:
+        enabled: false
+      tasks:
+        - task_key: rebuild_indicators
+          environment_key: indicators_env
+          timeout_seconds: 1800
+          max_retries: 0
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: stock_market_hybrid
+            entry_point: landed_indicators
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema-prefix
+              - ${var.schema_prefix}
+              - --bucket
+              - ${var.bucket}
+      environments:
+        - environment_key: indicators_env
+          spec:
+            environment_version: "4"
+            # No external API calls (reads an already-published Databricks
+            # table) - only the wheel is needed, no yfinance.
+            dependencies:
+              - ./dist/*.whl
+
+    maintain_delta_tables:
+      name: stock-market-hybrid-${bundle.target}-maintain-delta-tables
+      description: >-
+        Scheduled OPTIMIZE + VACUUM (RETAIN 168 HOURS, Delta's own safety
+        floor - never bypassed) across every table this migration owns.
+        The one job in this bundle that runs on a real schedule rather than
+        being manually triggered - see databricks_maintenance.py's module
+        docstring for why that's a deliberate exception, not an
+        inconsistency, and why the schedule ships PAUSED by default.
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+      queue:
+        enabled: false
+      # PAUSED by default (see the maintenance_schedule_status variable) -
+      # `bundle deploy` creates this schedule's definition but never
+      # silently starts it firing; unpausing is a separate, explicit action.
+      schedule:
+        quartz_cron_expression: ${var.maintenance_cron}
+        timezone_id: "UTC"
+        pause_status: ${var.maintenance_schedule_status}
+      tasks:
+        - task_key: optimize_and_vacuum
+          environment_key: maintenance_env
+          timeout_seconds: 1800
+          max_retries: 0
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: stock_market_hybrid
+            entry_point: maintain_delta_tables
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema-prefix
+              - ${var.schema_prefix}
+      environments:
+        - environment_key: maintenance_env
+          spec:
+            environment_version: "4"
+            # OPTIMIZE/VACUUM only - no external API calls, no yfinance.
+            dependencies:
+              - ./dist/*.whl
 
 targets:
   dev:

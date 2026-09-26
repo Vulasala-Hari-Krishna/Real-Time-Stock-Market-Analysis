@@ -44,10 +44,18 @@ MANIFEST_VERSION = 1
 DATASET_BUSINESS_KEYS: dict[str, tuple[str, ...]] = {
     "daily_quote_summary": ("provider", "symbol", "capture_date_utc"),
     "fundamentals": ("symbol",),
+    "historical_ohlcv": ("symbol", "date"),
+    "daily_summaries": ("symbol", "date"),
+    "sector_performance": ("sector", "date"),
+    "correlations": ("symbol_a", "symbol_b", "date"),
 }
 DATASET_CUTOFF_COLUMN: dict[str, str] = {
     "daily_quote_summary": "capture_date_utc",
     "fundamentals": "retrieved_at",
+    "historical_ohlcv": "date",
+    "daily_summaries": "date",
+    "sector_performance": "date",
+    "correlations": "date",
 }
 
 

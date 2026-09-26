@@ -137,6 +137,9 @@ def fetch_all(
         trusted process (nothing untrusted was ever persisted to reject).
     """
     extraction_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
+    logger.info(
+        "Starting fetch of %d symbols (extraction_id=%s)", len(symbols), extraction_id
+    )
     rows = []
     for index, symbol in enumerate(symbols):
         if index:
@@ -148,6 +151,20 @@ def fetch_all(
             row = record.model_dump(mode="json")
             row["extraction_id"] = extraction_id
             rows.append(row)
+        logger.info(
+            "Progress: %d/%d symbols attempted (%s: %s) - %d succeeded so far",
+            index + 1,
+            len(symbols),
+            symbol,
+            "ok" if record is not None else "failed",
+            len(rows),
+        )
+    logger.info(
+        "Finished fetch: %d/%d symbols succeeded (extraction_id=%s)",
+        len(rows),
+        len(symbols),
+        extraction_id,
+    )
     return rows
 
 
