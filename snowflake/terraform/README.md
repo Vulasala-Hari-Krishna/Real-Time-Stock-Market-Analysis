@@ -1,8 +1,11 @@
 # Snowflake Platform IaC
 
 See [../README.md](../README.md) for R4, the snapshot loader that consumes
-this platform (`workspace/main.tf` now also creates a `SERVING` schema for
-its published output, added while designing R4 - not yet applied live).
+this platform, and R5, the read-only Streamlit view. `workspace/main.tf`
+now also creates a `SERVING` schema (R4's publish target) and a second,
+read-only `reader` account role (R5's dashboard identity, `SELECT`-only on
+`SERVING`, granted to the same trial user but never the loader role) -
+added while designing R4/R5, not yet applied live.
 
 ## Status
 

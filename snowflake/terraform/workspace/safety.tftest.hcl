@@ -12,6 +12,8 @@ variables {
   organization_name          = "ILMRWBU"
   account_name               = "TX52777"
   loader_grantee_user        = "TESTUSER"
+  reader_role_name           = "PORTFOLIO_DEV_READER"
+  reader_grantee_user        = "TESTUSER"
   trust_activation_confirmed = true
 }
 
@@ -81,5 +83,21 @@ run "platform_boundaries" {
       toset(snowflake_grant_privileges_to_account_role.serving_schema_privileges.privileges) == toset(["USAGE", "CREATE TABLE"])
     )
     error_message = "The loader role must be able to create and use its own serving-table objects in a schema separate from staging."
+  }
+  assert {
+    condition = (
+      snowflake_account_role.reader.name != snowflake_account_role.loader.name &&
+      snowflake_account_role.reader.name != "ACCOUNTADMIN" &&
+      snowflake_grant_account_role.reader_to_user.role_name == snowflake_account_role.reader.name &&
+      snowflake_grant_account_role.reader_to_user.user_name == var.reader_grantee_user
+    )
+    error_message = "The reader role must be distinct from the loader role, non-admin, and actually granted to a user."
+  }
+  assert {
+    condition = (
+      toset(snowflake_grant_privileges_to_account_role.reader_serving_select_existing.privileges) == toset(["SELECT"]) &&
+      toset(snowflake_grant_privileges_to_account_role.reader_serving_select_future.privileges) == toset(["SELECT"])
+    )
+    error_message = "The reader role must only receive SELECT on SERVING tables, never write/staging privileges."
   }
 }
