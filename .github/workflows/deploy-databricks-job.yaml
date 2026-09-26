@@ -1,9 +1,17 @@
 name: Deploy Databricks Job
 
-# Deploys and runs the landed_ticks wheel-task bundle (databricks/databricks.yml)
-# against a small generated fixture, completing R1. Reads catalog/bucket/service-
-# principal values directly from the workspace Terraform root's remote state
-# (no manual copying) via deploy-databricks-platform.yaml's backend.
+# Validates and deploys the landed_ticks wheel-task bundle
+# (databricks/databricks.yml) - infra only. This workflow does NOT trigger a
+# run or upload a fixture: GitHub Actions owns infra deploy/update/teardown
+# in this project, never job execution or triggering it. Per the target
+# architecture (docs/hybrid-migration.md), local Airflow is meant to trigger
+# Databricks job runs via the Databricks Job API (R8, not yet built) - until
+# then, trigger a run manually from the Databricks workspace UI (Workflows ->
+# stock-market-hybrid-<target>-landed-ticks -> Run now) or via
+# `databricks bundle run -t dev landed_ticks` from a machine with the
+# Databricks CLI configured. Reads catalog/bucket/service-principal values
+# directly from the workspace Terraform root's remote state (no manual
+# copying) via deploy-databricks-platform.yaml's backend.
 #
 # Prerequisites: deploy-databricks-platform.yaml has already run successfully
 # in the same environment/region. Needs repo secrets DATABRICKS_HOST and
@@ -88,8 +96,8 @@ jobs:
           echo "bucket=$(jq -r .bucket /tmp/bundle_vars.json)" >> "$GITHUB_OUTPUT"
           echo "run_as_service_principal=$(jq -r .run_as_service_principal /tmp/bundle_vars.json)" >> "$GITHUB_OUTPUT"
 
-  deploy-and-run:
-    name: Bundle Validate, Deploy, Run
+  deploy:
+    name: Bundle Validate and Deploy (infra only, no run)
     runs-on: ubuntu-latest
     needs: read-platform-state
     environment: ${{ inputs.environment }}
@@ -110,44 +118,6 @@ jobs:
 
       - uses: databricks/setup-cli@main
 
-      - name: Generate and upload a small fixture tick file
-        run: |
-          # Fixed source_id/timestamp/S3 key on every run, deliberately - NOT
-          # tied to GITHUB_RUN_ID. Auto Loader tracks already-seen files by
-          # path in its checkpoint, so re-uploading the same path each run
-          # means later runs correctly find nothing new to ingest, exercising
-          # rebuild_outputs' no-op/replay skip instead of piling up one more
-          # distinct accepted quote per workflow run.
-          python3 - <<'PY'
-          import base64, gzip, json
-
-          FIXED_TIMESTAMP = "2026-01-01T00:00:00+00:00"
-          payload = {
-              "symbol": "AAPL",
-              "price": 150.25,
-              "volume": 1000,
-              "timestamp": FIXED_TIMESTAMP,
-              "source": "ci_fixture",
-          }
-          envelope = {
-              "schema_version": 1,
-              "source_id": "ci-fixture-v1",
-              "topic": "raw_stock_ticks",
-              "partition": 0,
-              "offset": 1,
-              "kafka_timestamp": None,
-              "ingested_at": FIXED_TIMESTAMP,
-              "key_base64": None,
-              "value_base64": base64.b64encode(json.dumps(payload).encode()).decode(),
-              "headers": [],
-          }
-          with gzip.open("/tmp/ci-fixture.json.gz", "wt") as f:
-              f.write(json.dumps(envelope) + "\n")
-          PY
-          aws s3 cp /tmp/ci-fixture.json.gz \
-            "s3://${BUNDLE_VAR_bucket}/landing/ticks/ci-fixture/fixture-v1.json.gz" \
-            --region "${{ inputs.aws-region }}"
-
       - name: databricks bundle validate
         working-directory: databricks
         run: databricks bundle validate -t dev
@@ -156,26 +126,11 @@ jobs:
         working-directory: databricks
         run: databricks bundle deploy -t dev
 
-      - name: databricks bundle run (landed_ticks)
-        working-directory: databricks
-        run: databricks bundle run -t dev landed_ticks
-
-      - name: Verify the five owned Unity Catalog tables exist
-        env:
-          CATALOG: ${{ needs.read-platform-state.outputs.catalog }}
-          PREFIX: ${{ needs.read-platform-state.outputs.schema_prefix }}
+      - name: Next step (manual)
         run: |
-          for table in \
-            "${CATALOG}.${PREFIX}_bronze.ticks_raw" \
-            "${CATALOG}.${PREFIX}_silver.quote_samples" \
-            "${CATALOG}.${PREFIX}_silver.ticks_quarantine" \
-            "${CATALOG}.${PREFIX}_gold.daily_quote_summary" \
-            "${CATALOG}.${PREFIX}_gold.ticks_pipeline_state"; do
-            echo ">>> Checking ${table}"
-            databricks tables get "${table}" > /dev/null
-          done
-          echo "All five owned tables exist. Check ticks_pipeline_state's" \
-               "'status' column in the Databricks UI/a notebook to confirm" \
-               "'completed', and review quote_samples/ticks_quarantine row" \
-               "counts - this workflow only proves the tables exist, not their" \
-               "row-level contents (no SQL warehouse is deployed for this slice)."
+          echo "Deployed. This workflow does not trigger a run or upload a" \
+               "fixture - GitHub Actions owns infra deploy/update/teardown" \
+               "only. Trigger the job manually from the Databricks workspace" \
+               "UI (Workflows -> stock-market-hybrid-${{ inputs.environment }}" \
+               "-landed-ticks -> Run now), or via 'databricks bundle run -t dev" \
+               "landed_ticks' from a machine with the Databricks CLI configured."

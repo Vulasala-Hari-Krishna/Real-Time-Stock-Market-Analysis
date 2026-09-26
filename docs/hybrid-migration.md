@@ -272,6 +272,47 @@ only - it was briefly broadened to the `landing` parent prefix while the
 landing-file design was in place, then reverted once that design was
 abandoned, since fundamentals needs no S3 read access at all.
 
+## Historical OHLCV Contract (R6, second migrated product)
+
+Migrates `historical_backfill.py`'s distinct capability - a yfinance-based
+multi-year daily OHLCV backfill. `tick_rollup.py`'s role (rolling up
+live-captured ticks into daily bars) is **not** separately re-implemented:
+R1's `daily_quote_summary` gold table already serves that purpose for
+current activity, even though it is shaped as sampled quotes rather than
+strict OHLCV. `databricks_historical.py` follows the exact same direct-fetch
+pattern as fundamentals (no S3 landing, no Auto Loader, yfinance called
+directly from the job, every run a genuine new observation with no
+idempotency skip): bronze `historical_ohlcv_raw` is append-only across runs;
+gold `historical_ohlcv` is the most recently fetched row per `(symbol,
+date)` across all accumulated bronze history (a later re-fetch can carry a
+retroactive split/dividend correction, so latest-fetched wins). Business key
+is `(symbol, date)`.
+
+## Indicators/Signals/Sector/Correlations Contract (R6, third migrated product)
+
+Migrates `daily_aggregation.py` by reusing its indicator/signal/sector/
+correlation transform functions directly (`compute_daily_summaries`,
+`compute_sector_performance`, `compute_correlation_matrix`) - they are pure
+Spark DataFrame transforms with no S3-path-specific logic and already have
+real-Spark test coverage from the legacy job, so porting means importing,
+not re-implementing. Unlike every other job in this migration,
+`databricks_indicators.py` has no fetch/bronze stage of its own: its input
+is `databricks_historical.py`'s already-published gold `historical_ohlcv`
+table, read at a pinned version. Every run fully recomputes all three
+outputs from that version - the legacy job's "daily incremental MERGE" mode
+is deliberately dropped in favor of the same "always rebuild" simplification
+used throughout this migration, appropriate at this project's data scale.
+Publishes three gold tables with the MERGE keys already documented in
+[README.md](../README.md#merge-keys): `daily_summaries` (`symbol, date`),
+`sector_performance` (`sector, date`), `correlations` (`symbol_a, symbol_b,
+date`).
+
+All four R6 products (fundamentals, historical_ohlcv, daily_summaries/
+sector_performance/correlations) publish through the same generic R2
+exporter and R4 loader with no code changes to either - only a registry
+entry and SQL DDL per dataset, confirming the "build generic across
+datasets" decision made in R2/R4 scales as intended.
+
 ## Access and IaC Ownership
 
 The optional [hybrid access template](../cloudformation/05-hybrid-access.yaml)

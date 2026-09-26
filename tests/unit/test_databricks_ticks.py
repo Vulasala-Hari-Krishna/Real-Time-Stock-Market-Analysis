@@ -114,9 +114,11 @@ def test_snapshot_write_does_not_evolve_schema(config: job.TickJobConfig) -> Non
     writer = frame.write.format.return_value
     writer.mode.return_value = writer
     writer.option.return_value = writer
+    writer.options.return_value = writer
     job.write_snapshot(frame, config, "summary")
     writer.mode.assert_called_once_with("overwrite")
     writer.option.assert_called_once_with("path", config.path("summary"))
+    writer.options.assert_called_once_with(**job.DELTA_AUTO_OPTIMIZE_PROPERTIES)
     writer.saveAsTable.assert_called_once_with(config.table("summary"))
 
 

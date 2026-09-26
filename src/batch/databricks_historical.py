@@ -1,19 +1,15 @@
-"""Manual Databricks fundamentals vertical slice using runtime Spark and Delta.
+"""Manual Databricks historical OHLCV vertical slice using runtime Spark and
+Delta.
 
-R6's first migrated legacy product (fundamental_enrichment.py). Unlike the
-ticks slice, there is no S3 landing/Auto Loader stage here: the job fetches
-yfinance directly (see landed_fundamentals.py::fetch_all) and appends the
-results straight to bronze. This mirrors how the legacy Spark job already
-fetched yfinance from inside itself, and keeps this business logic running
-on Databricks compute - not on a GitHub Actions runner (which owns infra
-deploy/update/teardown here, never job execution; see landed_fundamentals.py's
-module docstring for why a GitHub-Actions-hosted fetch was tried and
-abandoned).
+R6's second migrated legacy product (historical_backfill.py). Structurally
+identical to databricks_fundamentals.py: no S3 landing/Auto Loader stage,
+the job fetches yfinance directly and appends straight to bronze, and every
+run is a genuine new observation (no landed-file checkpoint to be idempotent
+against), so this job always fetches and rebuilds gold.
 
-Every run is a genuine new observation (there is no landed-file checkpoint
-to make a run idempotent against), so this job always fetches and rebuilds
-gold - unlike databricks_ticks.py, there is no "snapshot already current"
-skip.
+tick_rollup.py's role (rolling up live ticks into daily bars) is already
+served by R1's daily_quote_summary gold table and is not re-implemented
+here - see landed_historical.py's module docstring.
 """
 
 import argparse
@@ -24,42 +20,45 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from src.batch.databricks_common import DELTA_AUTO_OPTIMIZE_PROPERTIES
-from src.batch.landed_fundamentals import (
+from src.batch.landed_historical import (
+    BACKFILL_YEARS,
     BRONZE_SCHEMA,
-    fetch_all,
-    project_fundamentals,
-    rank_latest_per_symbol,
+    fetch_all_history,
+    project_historical,
+    rank_latest_per_symbol_date,
 )
 from src.config.watchlist import SYMBOLS
 
 logger = logging.getLogger(__name__)
-PIPELINE_REVISION = "fundamentals-v2-direct-fetch"
+PIPELINE_REVISION = "historical-v1-direct-fetch"
 
 TABLES = {
-    "raw": ("bronze", "fundamentals_raw"),
-    "summary": ("gold", "fundamentals"),
-    "state": ("gold", "fundamentals_pipeline_state"),
+    "raw": ("bronze", "historical_ohlcv_raw"),
+    "summary": ("gold", "historical_ohlcv"),
+    "state": ("gold", "historical_pipeline_state"),
 }
 STATE_SCHEMA = (
     "status string, pipeline_revision string, bronze_version long, "
-    "fetched_rows long, skipped_rows long, gold_rows long, summary_version long"
+    "fetched_rows long, skipped_symbols long, gold_rows long, summary_version long"
 )
 
 
-class FundamentalsJobConfig(BaseModel):
+class HistoricalJobConfig(BaseModel):
     """Explicit job parameters with isolated storage and safe UC identifiers.
 
     Attributes:
         catalog: Existing Unity Catalog catalog.
         schema_prefix: Prefix for existing bronze/gold schemas.
         bucket: Existing S3 bucket, accessed through Unity Catalog.
+        backfill_years: Years of history to fetch per symbol.
         max_input_rows: Full-rebuild safety limit on accumulated bronze history.
     """
 
     catalog: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     schema_prefix: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     bucket: str = Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-    max_input_rows: int = Field(default=100000, ge=1, le=1000000)
+    backfill_years: int = Field(default=BACKFILL_YEARS, ge=1, le=25)
+    max_input_rows: int = Field(default=200000, ge=1, le=2000000)
 
     def table(self, dataset: str) -> str:
         """Return the qualified identifier for an owned dataset."""
@@ -75,7 +74,7 @@ class FundamentalsJobConfig(BaseModel):
         )
 
 
-def validate_locations(spark: SparkSession, config: FundamentalsJobConfig) -> None:
+def validate_locations(spark: SparkSession, config: HistoricalJobConfig) -> None:
     """Reject existing tables with the wrong format or external location.
 
     Args:
@@ -105,9 +104,7 @@ def table_version(spark: SparkSession, table: str) -> int:
     return int(history["version"])
 
 
-def write_snapshot(
-    frame: DataFrame, config: FundamentalsJobConfig, dataset: str
-) -> None:
+def write_snapshot(frame: DataFrame, config: HistoricalJobConfig, dataset: str) -> None:
     """Atomically replace one owned Delta dataset, including valid empty results."""
     (
         frame.write.format("delta")
@@ -119,14 +116,14 @@ def write_snapshot(
 
 
 def append_bronze(
-    spark: SparkSession, config: FundamentalsJobConfig, rows: list[dict]
+    spark: SparkSession, config: HistoricalJobConfig, rows: list[dict]
 ) -> int:
     """Append this run's fetched rows to bronze and return the new version.
 
     Args:
         spark: Runtime session.
         config: Table identities.
-        rows: Fetched/validated rows from fetch_all (never empty - callers
+        rows: Fetched rows from fetch_all_history (never empty - callers
             must refuse to append an empty batch before calling this).
 
     Returns:
@@ -146,9 +143,9 @@ def append_bronze(
 
 
 def rebuild_outputs(
-    spark: SparkSession, config: FundamentalsJobConfig, symbols: list[str]
+    spark: SparkSession, config: HistoricalJobConfig, symbols: list[str]
 ) -> dict[str, int]:
-    """Fetch fresh data, append to bronze, and republish gold from all history.
+    """Fetch fresh history, append to bronze, and republish gold from all history.
 
     Args:
         spark: Runtime session; UTC must be configured by the caller.
@@ -156,18 +153,21 @@ def rebuild_outputs(
         symbols: Ticker symbols to fetch this run.
 
     Returns:
-        Counts of fetched/skipped symbols this run and the resulting gold
-        row count.
+        Counts of fetched rows/skipped symbols this run and the resulting
+        gold row count.
 
     Raises:
         RuntimeError: If every symbol failed to fetch - never appends an
-            empty batch silently as if it were a legitimate observation.
+            empty bronze batch silently as if it were a legitimate
+            observation.
         ValueError: When the accumulated bronze history exceeds the
             full-rebuild size guard.
     """
     state = ["processing", PIPELINE_REVISION, -1, 0, 0, 0, -1]
     write_snapshot(spark.createDataFrame([tuple(state)], STATE_SCHEMA), config, "state")
-    rows = fetch_all(symbols)
+    rows = fetch_all_history(symbols, years=config.backfill_years)
+    fetched_symbols = {row["symbol"] for row in rows}
+    skipped_symbols = len(symbols) - len(fetched_symbols)
     if not rows:
         raise RuntimeError(
             f"All {len(symbols)} symbols failed to fetch; refusing to append an empty bronze batch"
@@ -180,15 +180,15 @@ def rebuild_outputs(
             "Accumulated bronze history exceeds the full-rebuild row limit; "
             "incremental design required"
         )
-    latest = rank_latest_per_symbol(bronze)
-    gold = project_fundamentals(latest).withColumn(
+    latest = rank_latest_per_symbol_date(bronze)
+    gold = project_historical(latest).withColumn(
         "bronze_version", F.lit(bronze_version)
     )
     write_snapshot(gold, config, "summary")
     gold_rows = gold.count()
     counts = {
         "fetched": len(rows),
-        "skipped": len(symbols) - len(rows),
+        "skipped_symbols": skipped_symbols,
         "gold_rows": gold_rows,
     }
     state = [
@@ -196,7 +196,7 @@ def rebuild_outputs(
         PIPELINE_REVISION,
         bronze_version,
         counts["fetched"],
-        counts["skipped"],
+        counts["skipped_symbols"],
         gold_rows,
         table_version(spark, config.table("summary")),
     ]
@@ -206,7 +206,7 @@ def rebuild_outputs(
 
 
 def run(
-    spark: SparkSession, config: FundamentalsJobConfig, symbols: list[str] | None = None
+    spark: SparkSession, config: HistoricalJobConfig, symbols: list[str] | None = None
 ) -> dict[str, int]:
     """Fetch and rebuild - every run is a new observation, never a no-op."""
     spark.conf.set("spark.sql.session.timeZone", "UTC")
@@ -220,25 +220,25 @@ def main() -> None:
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--schema-prefix", required=True)
     parser.add_argument("--bucket", required=True)
-    parser.add_argument("--max-input-rows", type=int, default=100000)
+    parser.add_argument("--backfill-years", type=int, default=BACKFILL_YEARS)
+    parser.add_argument("--max-input-rows", type=int, default=200000)
     parser.add_argument(
         "--symbols",
         default=None,
         help="Comma-separated override; defaults to the watchlist",
     )
     args = parser.parse_args()
-    config = FundamentalsJobConfig(
+    config = HistoricalJobConfig(
         catalog=args.catalog,
         schema_prefix=args.schema_prefix,
         bucket=args.bucket,
+        backfill_years=args.backfill_years,
         max_input_rows=args.max_input_rows,
     )
     symbols = args.symbols.split(",") if args.symbols else None
     # force=True: Databricks Runtime configures the root logger before this
     # code ever runs, and basicConfig() silently no-ops if the root logger
-    # already has handlers - without force=True, every logger.info/warning
-    # call below is silently swallowed (confirmed live 2026-09-26: no log
-    # output appeared for a run that was actually progressing).
+    # already has handlers (found live 2026-09-26 in databricks_fundamentals.py).
     logging.basicConfig(level=logging.INFO, force=True)
     run(SparkSession.builder.getOrCreate(), config, symbols=symbols)
 

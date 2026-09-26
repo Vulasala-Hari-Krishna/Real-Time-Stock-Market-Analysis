@@ -2,11 +2,12 @@
 
 Both the exporter (`src/export/gold_snapshot.py`) and this loader
 (`src/load/snowflake_snapshot.py`) were built generic across datasets, not
-hand-tied to `daily_quote_summary` - R6's `fundamentals` dataset (see
-[docs/hybrid-migration.md](../docs/hybrid-migration.md#fundamentals-snapshot-contract-r6))
-needed only a registry entry in each plus its own
-`snowflake/sql/004_staging_fundamentals.sql` /
-`005_serving_fundamentals.sql`, not a redesign.
+hand-tied to `daily_quote_summary` - all of R6's migrated products
+(`fundamentals`, `historical_ohlcv`, `daily_summaries`, `sector_performance`,
+`correlations`; see [docs/hybrid-migration.md](../docs/hybrid-migration.md))
+needed only a registry entry in each plus their own `snowflake/sql/`
+staging/serving DDL pair, not a redesign - six datasets registered total,
+confirming the "generic across datasets" decision scales.
 
 ## Status
 

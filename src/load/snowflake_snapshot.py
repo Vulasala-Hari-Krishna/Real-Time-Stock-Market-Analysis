@@ -61,10 +61,18 @@ CONTROL_SQL_FILE = "001_control_batch_ledger.sql"
 DATASET_STAGING_TABLE: dict[str, str] = {
     "daily_quote_summary": "DAILY_QUOTE_SUMMARY_STAGING",
     "fundamentals": "FUNDAMENTALS_STAGING",
+    "historical_ohlcv": "HISTORICAL_OHLCV_STAGING",
+    "daily_summaries": "DAILY_SUMMARIES_STAGING",
+    "sector_performance": "SECTOR_PERFORMANCE_STAGING",
+    "correlations": "CORRELATIONS_STAGING",
 }
 DATASET_SERVING_TABLE: dict[str, str] = {
     "daily_quote_summary": "DAILY_QUOTE_SUMMARY",
     "fundamentals": "FUNDAMENTALS",
+    "historical_ohlcv": "HISTORICAL_OHLCV",
+    "daily_summaries": "DAILY_SUMMARIES",
+    "sector_performance": "SECTOR_PERFORMANCE",
+    "correlations": "CORRELATIONS",
 }
 DATASET_SQL_FILES: dict[str, tuple[str, str]] = {
     "daily_quote_summary": (
@@ -74,6 +82,22 @@ DATASET_SQL_FILES: dict[str, tuple[str, str]] = {
     "fundamentals": (
         "004_staging_fundamentals.sql",
         "005_serving_fundamentals.sql",
+    ),
+    "historical_ohlcv": (
+        "006_staging_historical_ohlcv.sql",
+        "007_serving_historical_ohlcv.sql",
+    ),
+    "daily_summaries": (
+        "008_staging_daily_summaries.sql",
+        "009_serving_daily_summaries.sql",
+    ),
+    "sector_performance": (
+        "010_staging_sector_performance.sql",
+        "011_serving_sector_performance.sql",
+    ),
+    "correlations": (
+        "012_staging_correlations.sql",
+        "013_serving_correlations.sql",
     ),
 }
 DATASET_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -110,6 +134,59 @@ DATASET_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("sector", "VARCHAR"),
         ("industry", "VARCHAR"),
         ("bronze_version", "NUMBER(38,0)"),
+    ),
+    "historical_ohlcv": (
+        ("symbol", "VARCHAR"),
+        ("date", "DATE"),
+        ("open", "DOUBLE"),
+        ("high", "DOUBLE"),
+        ("low", "DOUBLE"),
+        ("close", "DOUBLE"),
+        ("volume", "NUMBER(38,0)"),
+        ("source", "VARCHAR"),
+        ("bronze_version", "NUMBER(38,0)"),
+    ),
+    "daily_summaries": (
+        ("symbol", "VARCHAR"),
+        ("date", "DATE"),
+        ("open", "DOUBLE"),
+        ("high", "DOUBLE"),
+        ("low", "DOUBLE"),
+        ("close", "DOUBLE"),
+        ("volume", "NUMBER(38,0)"),
+        ("daily_return_pct", "DOUBLE"),
+        ("sma_20", "DOUBLE"),
+        ("sma_50", "DOUBLE"),
+        ("sma_200", "DOUBLE"),
+        ("ema_12", "DOUBLE"),
+        ("ema_26", "DOUBLE"),
+        ("rsi_14", "DOUBLE"),
+        ("macd_line", "DOUBLE"),
+        ("macd_signal", "DOUBLE"),
+        ("macd_histogram", "DOUBLE"),
+        ("volume_vs_avg", "DOUBLE"),
+        ("sector", "VARCHAR"),
+        ("signals", "VARCHAR"),
+        # Lineage column referencing databricks_historical.py's gold
+        # historical_ohlcv table's version, not this job's own bronze -
+        # this job has no bronze of its own (it recomputes fully from an
+        # already-published gold table each run).
+        ("source_version", "NUMBER(38,0)"),
+    ),
+    "sector_performance": (
+        ("sector", "VARCHAR"),
+        ("date", "DATE"),
+        ("avg_return_pct", "DOUBLE"),
+        ("top_performer", "VARCHAR"),
+        ("bottom_performer", "VARCHAR"),
+        ("source_version", "NUMBER(38,0)"),
+    ),
+    "correlations": (
+        ("date", "DATE"),
+        ("symbol_a", "VARCHAR"),
+        ("symbol_b", "VARCHAR"),
+        ("correlation", "DOUBLE"),
+        ("source_version", "NUMBER(38,0)"),
     ),
 }
 

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
+from src.batch.databricks_common import DELTA_AUTO_OPTIMIZE_PROPERTIES
 from src.batch.landed_ticks import QUOTE_KEYS, classify_ticks, summarize_quotes
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,7 @@ def write_snapshot(frame: DataFrame, config: TickJobConfig, dataset: Dataset) ->
         frame.write.format("delta")
         .mode("overwrite")
         .option("path", config.path(dataset))
+        .options(**DELTA_AUTO_OPTIMIZE_PROPERTIES)
         .saveAsTable(config.table(dataset))
     )
 
@@ -260,7 +262,12 @@ def main() -> None:
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--max-input-rows", type=int, default=100000)
     config = TickJobConfig(**vars(parser.parse_args()))
-    logging.basicConfig(level=logging.INFO)
+    # force=True: Databricks Runtime configures the root logger before this
+    # code ever runs, and basicConfig() silently no-ops if the root logger
+    # already has handlers - without force=True, logger.info/warning calls
+    # below would be silently swallowed (found while debugging the same
+    # issue in databricks_fundamentals.py, 2026-09-26).
+    logging.basicConfig(level=logging.INFO, force=True)
     run(SparkSession.builder.getOrCreate(), config)
 
 

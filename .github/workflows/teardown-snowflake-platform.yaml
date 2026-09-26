@@ -1,0 +1,281 @@
+name: Teardown Snowflake Platform
+
+# Reverse of deploy-snowflake-platform.yaml: destroys the workspace Terraform
+# root (warehouse/database/schema/roles/grants/stage), then the bootstrap
+# root (storage integration), then CloudFormation stack 07 (the Snowflake
+# storage role). Requires the SAME database/schema/warehouse/role/
+# integration name inputs used at deploy time, because Terraform must
+# recompute the same resource addresses to know what to destroy.
+#
+# Deliberately does NOT touch stack 00 (the Terraform state bucket/lock
+# table): that resource is what this very pipeline depends on, and it uses
+# DeletionPolicy: Retain in the template. Delete it manually only after
+# confirming both Terraform roots destroyed cleanly - and only once the
+# Databricks roots (which share the same state bucket, different keys) are
+# also torn down, if this is a full project teardown.
+#
+# The workspace destroy will fail if the database/schema still contain
+# tables the loader created (fundamentals/daily_quote_summary staging and
+# serving tables, the batch ledger) - drop those in Snowflake first if the
+# loader has ever actually run (see snowflake/README.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (only dev allowed)'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+      confirmation:
+        description: 'Type DESTROY to confirm teardown'
+        required: true
+        type: string
+      aws-region:
+        description: 'AWS region (must match the deploy run)'
+        required: true
+        default: 'us-east-2'
+        type: string
+      database_name:
+        description: 'Same database name used at deploy time'
+        required: true
+        default: 'STOCK_MARKET_DEV'
+        type: string
+      schema_name:
+        description: 'Same staging schema name used at deploy time'
+        required: true
+        default: 'PUBLISH_STAGING'
+        type: string
+      serving_schema_name:
+        description: 'Same serving schema name used at deploy time'
+        required: true
+        default: 'SERVING'
+        type: string
+      warehouse_name:
+        description: 'Same warehouse name used at deploy time'
+        required: true
+        default: 'STOCK_MARKET_DEV_WH'
+        type: string
+      loader_role_name:
+        description: 'Same loader role name used at deploy time'
+        required: true
+        default: 'STOCK_MARKET_DEV_LOADER'
+        type: string
+      reader_role_name:
+        description: 'Same reader role name used at deploy time'
+        required: true
+        default: 'STOCK_MARKET_DEV_READER'
+        type: string
+      integration_name:
+        description: 'Same storage integration name used at deploy time'
+        required: true
+        default: 'STOCK_MARKET_DEV_PUBLISH_INTEGRATION'
+        type: string
+      credit_quota:
+        description: 'Same credit quota used at deploy time'
+        required: true
+        default: '10'
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+  SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+
+jobs:
+  validate:
+    name: Validate Confirmation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ inputs.confirmation }}" != "DESTROY" ]; then
+            echo "ERROR: You must type DESTROY to confirm teardown."
+            exit 1
+          fi
+          if [ "${{ inputs.environment }}" != "dev" ]; then
+            echo "ERROR: Teardown via workflow is only allowed for the dev environment."
+            exit 1
+          fi
+
+  read-state-and-role:
+    name: Read State Backend + Storage Role ARN
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: ${{ inputs.environment }}
+    outputs:
+      state_bucket: ${{ steps.state.outputs.bucket }}
+      lock_table: ${{ steps.state.outputs.table }}
+      storage_role_arn: ${{ steps.role.outputs.arn }}
+      data_bucket: ${{ steps.databucket.outputs.name }}
+      organization_name: ${{ steps.snowflake_account.outputs.organization_name }}
+      account_name: ${{ steps.snowflake_account.outputs.account_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Split SNOWFLAKE_ACCOUNT into organization_name/account_name
+        id: snowflake_account
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+        run: |
+          ORG="${SNOWFLAKE_ACCOUNT%%-*}"
+          ACCT="${SNOWFLAKE_ACCOUNT#*-}"
+          echo "organization_name=${ORG}" >> "$GITHUB_OUTPUT"
+          echo "account_name=${ACCT}" >> "$GITHUB_OUTPUT"
+
+      - name: Read Terraform state backend outputs (stack 00 must already exist)
+        id: state
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformStateBucketName'].OutputValue" --output text)
+          TABLE=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-00-terraform-state-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TerraformLockTableName'].OutputValue" --output text)
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "table=${TABLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Read storage role ARN (stack 07 must still exist)
+        id: role
+        run: |
+          ARN=$(aws cloudformation describe-stacks \
+            --stack-name "stock-market-pipeline-07-snowflake-storage-role-${{ inputs.environment }}" \
+            --region "${{ inputs.aws-region }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='SnowflakeStorageRoleArn'].OutputValue" --output text)
+          echo "arn=${ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Read project data-lake bucket name
+        id: databucket
+        run: |
+          NAME=$(aws cloudformation list-exports --region "${{ inputs.aws-region }}" \
+            --query "Exports[?Name=='stock-market-pipeline-${{ inputs.environment }}-DataLakeBucketName'].Value" \
+            --output text)
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+
+  destroy-workspace:
+    name: 'Terraform: destroy workspace root'
+    runs-on: ubuntu-latest
+    needs: read-state-and-role
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state)
+        working-directory: snowflake/terraform/workspace
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ needs.read-state-and-role.outputs.state_bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ needs.read-state-and-role.outputs.lock_table }}"
+
+      - name: Terraform destroy
+        working-directory: snowflake/terraform/workspace
+        run: |
+          terraform destroy -input=false -auto-approve \
+            -var="bucket=${{ needs.read-state-and-role.outputs.data_bucket }}" \
+            -var="database_name=${{ inputs.database_name }}" \
+            -var="schema_name=${{ inputs.schema_name }}" \
+            -var="serving_schema_name=${{ inputs.serving_schema_name }}" \
+            -var="warehouse_name=${{ inputs.warehouse_name }}" \
+            -var="loader_role_name=${{ inputs.loader_role_name }}" \
+            -var="reader_role_name=${{ inputs.reader_role_name }}" \
+            -var="reader_grantee_user=${{ secrets.SNOWFLAKE_USER }}" \
+            -var="credit_quota=${{ inputs.credit_quota }}" \
+            -var="integration_name=${{ inputs.integration_name }}" \
+            -var="organization_name=${{ needs.read-state-and-role.outputs.organization_name }}" \
+            -var="account_name=${{ needs.read-state-and-role.outputs.account_name }}" \
+            -var="loader_grantee_user=${{ secrets.SNOWFLAKE_USER }}" \
+            -var="trust_activation_confirmed=true"
+
+  destroy-bootstrap:
+    name: 'Terraform: destroy bootstrap root (storage integration)'
+    runs-on: ubuntu-latest
+    needs: [read-state-and-role, destroy-workspace]
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform init (remote state)
+        working-directory: snowflake/terraform/bootstrap
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ needs.read-state-and-role.outputs.state_bucket }}" \
+            -backend-config="region=${{ inputs.aws-region }}" \
+            -backend-config="dynamodb_table=${{ needs.read-state-and-role.outputs.lock_table }}"
+
+      - name: Terraform destroy
+        working-directory: snowflake/terraform/bootstrap
+        run: |
+          terraform destroy -input=false -auto-approve \
+            -var="bucket=${{ needs.read-state-and-role.outputs.data_bucket }}" \
+            -var="storage_role_arn=${{ needs.read-state-and-role.outputs.storage_role_arn }}" \
+            -var="integration_name=${{ inputs.integration_name }}" \
+            -var="organization_name=${{ needs.read-state-and-role.outputs.organization_name }}" \
+            -var="account_name=${{ needs.read-state-and-role.outputs.account_name }}"
+
+  teardown-stack-07:
+    name: Teardown Snowflake Storage Role Stack (07)
+    runs-on: ubuntu-latest
+    needs: destroy-bootstrap
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Delete stack 07
+        run: |
+          STACK="stock-market-pipeline-07-snowflake-storage-role-${{ inputs.environment }}"
+          if aws cloudformation describe-stacks --stack-name "${STACK}" --region "${{ inputs.aws-region }}" >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name "${STACK}" --region "${{ inputs.aws-region }}"
+            aws cloudformation wait stack-delete-complete --stack-name "${STACK}" --region "${{ inputs.aws-region }}"
+            echo ">>> Stack ${STACK} deleted."
+          else
+            echo ">>> Stack ${STACK} does not exist, skipping."
+          fi
+
+      - name: Reminder about the state backend
+        run: |
+          echo "Snowflake platform destroyed (workspace root, bootstrap root, stack 07)."
+          echo "Stack 00 (Terraform state bucket + lock table) was NOT touched - it uses"
+          echo "DeletionPolicy: Retain deliberately, and is shared with the Databricks"
+          echo "Terraform roots (different state keys). Delete it manually only after"
+          echo "confirming every root using it (Databricks credential/workspace, this"
+          echo "Snowflake bootstrap/workspace) has been destroyed cleanly."
