@@ -295,12 +295,53 @@ def test_copy_into_staging_builds_delete_then_copy_with_exact_files(
         in copy_sql
     )
     assert "$1:provider::VARCHAR" in copy_sql
-    assert "$1:capture_date_utc::DATE" in copy_sql
+    assert "$1:capture_date_utc::TIMESTAMP_NTZ::DATE" in copy_sql
     assert "FROM (SELECT" in copy_sql and f"FROM @{config.stage_name})" in copy_sql
     assert (
         "FILES = ('batches/batch-1/daily_quote_summary/part-00000.parquet')" in copy_sql
     )
     assert "FILE_FORMAT = (TYPE = PARQUET)" in copy_sql
+
+
+def test_copy_into_staging_casts_date_columns_through_timestamp_ntz(
+    config: loader.SnowflakeLoadConfig,
+) -> None:
+    """Regression test: a bare $1:col::DATE cast only accepts a variant
+    string already shaped like plain YYYY-MM-DD - it rejects any value with
+    a time-of-day component, even midnight, rather than truncating it.
+    historical_ohlcv's `date` carries yfinance's daily-bar index time (the
+    exchange's session-open time, e.g. 13:30:00 UTC - not midnight),
+    confirmed live 2026-09-27 to fail Snowflake's COPY INTO with
+    "Failed to cast variant value ... to DATE". Casting through
+    TIMESTAMP_NTZ first, then to DATE, truncates correctly instead."""
+    historical_config = config.model_copy(update={"dataset": "historical_ohlcv"})
+    entry = ManifestDataset(
+        name="historical_ohlcv",
+        row_count=1,
+        business_keys=["symbol", "date"],
+        columns=[
+            ManifestColumn(name=name, type="string", nullable=True)
+            for name, _ in loader.DATASET_COLUMNS["historical_ohlcv"]
+        ],
+        files=[
+            ManifestFile(
+                key="publish/batches/batch-1/historical_ohlcv/part-00000.parquet",
+                size_bytes=123,
+                sha256="a" * 64,
+                row_count=1,
+            )
+        ],
+    )
+    cursor = FakeCursor()
+    conn = FakeConnection(cursor)
+
+    loader.copy_into_staging(conn, historical_config, entry, "batch-1")
+
+    copy_sql, _ = cursor.executed[1]
+    assert "$1:date::TIMESTAMP_NTZ::DATE" in copy_sql
+    # Non-DATE columns are untouched by this cast rewrite.
+    assert "$1:symbol::VARCHAR" in copy_sql
+    assert "$1:symbol::TIMESTAMP_NTZ" not in copy_sql
 
 
 def test_copy_into_staging_rejects_file_outside_batch_prefix(
@@ -551,3 +592,106 @@ def test_run_load_marks_ledger_failed_when_copy_raises(
     mock_publish.assert_not_called()
     mock_fail.assert_called_once()
     assert mock_fail.call_args.args[2] == "batch-3"
+
+
+# ---------------------------------------------------------------------------
+# all_owned_snowflake_tables / drop_all_owned_tables (teardown only, R9)
+# ---------------------------------------------------------------------------
+def test_all_owned_snowflake_tables_covers_every_dataset_and_the_ledger(
+    config: loader.SnowflakeLoadConfig,
+) -> None:
+    tables = loader.all_owned_snowflake_tables(config)
+
+    assert "STOCK_MARKET_DEV.PUBLISH_STAGING.BATCH_LEDGER" in tables
+    for dataset in loader.DATASET_STAGING_TABLE:
+        staging = loader.DATASET_STAGING_TABLE[dataset]
+        serving = loader.DATASET_SERVING_TABLE[dataset]
+        assert f"STOCK_MARKET_DEV.PUBLISH_STAGING.{staging}" in tables
+        assert f"STOCK_MARKET_DEV.SERVING.{serving}" in tables
+    # No duplicates - every owned table appears exactly once.
+    assert len(tables) == len(set(tables))
+
+
+def test_drop_all_owned_tables_drops_every_table(
+    config: loader.SnowflakeLoadConfig,
+) -> None:
+    cursor = FakeCursor()
+    conn = FakeConnection(cursor)
+
+    results = loader.drop_all_owned_tables(conn, config)
+
+    expected_tables = loader.all_owned_snowflake_tables(config)
+    executed_sql = [sql for sql, _ in cursor.executed]
+    for table in expected_tables:
+        assert f"DROP TABLE IF EXISTS {table}" in executed_sql
+        assert results[table] == {"table": table, "status": "ok"}
+    assert cursor.closed
+
+
+def test_drop_all_owned_tables_attempts_every_table_then_raises_if_any_failed(
+    config: loader.SnowflakeLoadConfig,
+) -> None:
+    cursor = FakeCursor()
+    conn = FakeConnection(cursor)
+    bad_table = loader.all_owned_snowflake_tables(config)[0]
+
+    def fake_execute(sql: str, params: tuple = ()) -> None:
+        cursor.executed.append((sql, params))
+        if bad_table in sql:
+            raise RuntimeError("boom")
+
+    cursor.execute = fake_execute  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match=r"Dropping failed for 1 table"):
+        loader.drop_all_owned_tables(conn, config)
+
+    # Every table was still attempted despite the one failure.
+    assert len(cursor.executed) == len(loader.all_owned_snowflake_tables(config))
+
+
+def test_parse_args_requires_dataset_bucket_stage_unless_dropping_owned_tables() -> (
+    None
+):
+    with pytest.raises(SystemExit):
+        loader._parse_args(
+            [
+                "--account",
+                "a",
+                "--user",
+                "u",
+                "--role",
+                "r",
+                "--warehouse",
+                "w",
+                "--database",
+                "d",
+                "--staging-schema",
+                "s1",
+                "--serving-schema",
+                "s2",
+            ]
+        )
+
+
+def test_parse_args_allows_drop_owned_tables_without_dataset_bucket_stage() -> None:
+    args = loader._parse_args(
+        [
+            "--account",
+            "a",
+            "--user",
+            "u",
+            "--role",
+            "r",
+            "--warehouse",
+            "w",
+            "--database",
+            "d",
+            "--staging-schema",
+            "s1",
+            "--serving-schema",
+            "s2",
+            "--drop-owned-tables",
+        ]
+    )
+    assert args.drop_owned_tables is True
+    assert args.dataset is None

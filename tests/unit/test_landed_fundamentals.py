@@ -1,5 +1,6 @@
 """Unit tests for src/batch/landed_fundamentals.py (R6, direct-fetch design)."""
 
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from src.batch import landed_fundamentals as lf
@@ -93,6 +94,25 @@ def test_fetch_all_returns_empty_list_when_everything_fails() -> None:
     with patch("yfinance.Ticker", side_effect=RuntimeError("boom")):
         rows = lf.fetch_all(["AAPL"], sleep=lambda _: None)
     assert rows == []
+
+
+def test_fetch_all_rows_keep_retrieved_at_as_a_real_datetime() -> None:
+    """Regression test: BRONZE_SCHEMA declares retrieved_at as a Spark
+    `timestamp`, which spark.createDataFrame only accepts as a real
+    datetime.datetime - a JSON-mode dump (which stringifies datetimes) was
+    never exercised end-to-end before every symbol succeeded fetching for
+    the first time (2026-09-27), and failed with an Arrow-conversion
+    AssertionError on Databricks."""
+
+    def fake_ticker(symbol: str) -> MagicMock:
+        mock = MagicMock()
+        mock.info = _fake_ticker_info()
+        return mock
+
+    with patch("yfinance.Ticker", side_effect=fake_ticker):
+        rows = lf.fetch_all(["AAPL"], sleep=lambda _: None)
+
+    assert isinstance(rows[0]["retrieved_at"], datetime)
 
 
 # ---------------------------------------------------------------------------

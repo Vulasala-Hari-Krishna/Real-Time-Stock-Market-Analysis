@@ -117,7 +117,13 @@ def fetch_all_history(
             pdf = pdf[
                 ["symbol", "date", "open", "high", "low", "close", "volume"]
             ].copy()
-            pdf["date"] = pd.to_datetime(pdf["date"], utc=True)
+            # .normalize() zeroes the time-of-day: yfinance's daily-bar index
+            # carries the exchange's session-open time (e.g. 13:30:00 UTC for
+            # NYSE), not midnight - (symbol, date) is meant to be one row per
+            # *trading day*, and a lingering intraday time both misrepresents
+            # that and broke Snowflake's DATE cast on COPY INTO (confirmed
+            # live 2026-09-27 - see snowflake_snapshot.py::copy_into_staging).
+            pdf["date"] = pd.to_datetime(pdf["date"], utc=True).dt.normalize()
             pdf["open"] = pdf["open"].astype(float)
             pdf["high"] = pdf["high"].astype(float)
             pdf["low"] = pdf["low"].astype(float)
@@ -144,7 +150,7 @@ def fetch_all_history(
 
 
 def rank_latest_per_symbol_date(bronze: DataFrame) -> DataFrame:
-    """Keep only the most recently fetched row per (symbol, date).
+    """Keep only the most recently fetched row per (symbol, calendar date).
 
     Bronze is append-only across runs; a later re-fetch of the same
     historical date can carry a correction (e.g. a retroactive
@@ -152,18 +158,39 @@ def rank_latest_per_symbol_date(bronze: DataFrame) -> DataFrame:
     latest-wins rule fundamentals uses, just keyed by (symbol, date)
     instead of (symbol) alone since this is a time series.
 
+    Partitions on ``date_trunc("day", date)``, not the raw ``date`` column -
+    bronze rows fetched before 2026-09-27 carry yfinance's daily-bar
+    exchange-open time-of-day (e.g. 13:30:00 UTC), not midnight; ranking on
+    the raw value let an old dirty-timestamp row and a new
+    midnight-normalized row for the same trading day both "win" their own
+    distinct partition, producing two gold rows for what Snowflake's DATE
+    cast then saw as one duplicate (symbol, date) pair - confirmed live
+    2026-09-27. Comparing the true calendar date instead means old and new
+    rows for the same day always compete in the same partition, and the
+    latest fetch (by ``bronze_ingested_at``) always wins regardless of
+    either row's exact stored time-of-day - self-healing, no one-time
+    bronze cleanup needed. ``date_trunc`` (not ``to_date``) deliberately -
+    it keeps ``date`` a ``timestamp`` (just with the time zeroed), matching
+    ``BRONZE_SCHEMA``'s declared type; switching to a real ``DateType``
+    would change gold's column type on the next overwrite, and that write
+    has no ``overwriteSchema``/``mergeSchema`` option set to allow it.
+
     Args:
         bronze: The full accumulated bronze history for this dataset.
 
     Returns:
-        One row per (symbol, date) - its most recently fetched observation.
+        One row per (symbol, calendar date) - its most recently fetched
+        observation, with ``date`` itself truncated to midnight regardless
+        of which row won.
     """
-    order = Window.partitionBy(*BUSINESS_KEYS).orderBy(
+    calendar_date = F.date_trunc("day", F.col("date"))
+    order = Window.partitionBy(F.col("symbol"), calendar_date).orderBy(
         F.col("bronze_ingested_at").desc(), "extraction_id"
     )
     return (
         bronze.withColumn("rank", F.row_number().over(order))
         .filter(F.col("rank") == 1)
+        .withColumn("date", calendar_date)
         .drop("rank")
     )
 

@@ -112,7 +112,7 @@ resources:
             # already-landed S3 files.
             dependencies:
               - ./dist/*.whl
-              - yfinance==0.2.36
+              - yfinance==0.2.66
 
     landed_historical:
       name: stock-market-hybrid-${bundle.target}-landed-historical
@@ -145,7 +145,14 @@ resources:
             environment_version: "4"
             dependencies:
               - ./dist/*.whl
-              - yfinance==0.2.36
+              - yfinance==0.2.66
+              # landed_historical.py reuses historical_backfill.py::download_history,
+              # and importing that module also executes its top-level
+              # `from src.config.settings import get_settings` (used by that
+              # module's own legacy Spark-session/CLI code, not by
+              # download_history itself) - confirmed live 2026-09-27:
+              # ModuleNotFoundError without this.
+              - pydantic-settings==2.2.1
 
     landed_indicators:
       name: stock-market-hybrid-${bundle.target}-landed-indicators
@@ -178,6 +185,11 @@ resources:
             # table) - only the wheel is needed, no yfinance.
             dependencies:
               - ./dist/*.whl
+              # databricks_indicators.py reuses daily_aggregation.py's
+              # transform functions, and importing that module also executes
+              # its top-level `from src.config.settings import get_settings` -
+              # same gap as historical_env, fixed the same way.
+              - pydantic-settings==2.2.1
 
     maintain_delta_tables:
       name: stock-market-hybrid-${bundle.target}-maintain-delta-tables
@@ -217,9 +229,23 @@ resources:
         - environment_key: maintenance_env
           spec:
             environment_version: "4"
-            # OPTIMIZE/VACUUM only - no external API calls, no yfinance.
+            # No external API calls of its own, but its import chain still
+            # needs two dependencies it never calls directly:
             dependencies:
               - ./dist/*.whl
+              # databricks_maintenance.py imports databricks_historical and
+              # databricks_indicators to build its table registry, which
+              # transitively import src.config.settings the same way
+              # historical_env/indicators_env do - same fix.
+              - pydantic-settings==2.2.1
+              # databricks_historical.py -> landed_historical.py ->
+              # historical_backfill.py, whose top-level `import yfinance as
+              # yf` (not lazy, unlike landed_fundamentals.py's in-function
+              # import) runs regardless of which function is actually used -
+              # confirmed live 2026-09-27: ModuleNotFoundError without this,
+              # the exact same missed-transitive-dependency pattern as the
+              # pydantic-settings gap above, just a different package.
+              - yfinance==0.2.66
 
 targets:
   dev:

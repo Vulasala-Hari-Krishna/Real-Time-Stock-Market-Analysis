@@ -97,6 +97,62 @@ def test_run_maintenance_attempts_every_table_then_raises_if_any_failed() -> Non
 
 
 # ---------------------------------------------------------------------------
+# drop_table / drop_all_owned_tables (teardown only)
+# ---------------------------------------------------------------------------
+def test_drop_table_issues_drop_table_if_exists() -> None:
+    spark = MagicMock()
+    result = job.drop_table(spark, "cat.schema.table")
+
+    assert result == {"table": "cat.schema.table", "status": "ok"}
+    spark.sql.assert_called_once_with("DROP TABLE IF EXISTS cat.schema.table")
+
+
+def test_drop_table_never_raises_on_failure() -> None:
+    spark = MagicMock()
+    spark.sql.side_effect = RuntimeError("boom")
+
+    result = job.drop_table(spark, "cat.schema.table")
+
+    assert result == {"table": "cat.schema.table", "status": "failed", "error": "boom"}
+
+
+def test_drop_all_owned_tables_succeeds_when_every_table_is_ok() -> None:
+    spark = MagicMock()
+    with patch.object(
+        job, "all_owned_tables", return_value=["cat.a.t1", "cat.a.t2"]
+    ), patch.object(
+        job,
+        "drop_table",
+        side_effect=lambda s, t: {"table": t, "status": "ok"},
+    ):
+        results = job.drop_all_owned_tables(spark, "portfolio", "stocks")
+
+    assert results == {
+        "cat.a.t1": {"table": "cat.a.t1", "status": "ok"},
+        "cat.a.t2": {"table": "cat.a.t2", "status": "ok"},
+    }
+
+
+def test_drop_all_owned_tables_attempts_every_table_then_raises_if_any_failed() -> None:
+    spark = MagicMock()
+
+    def fake_drop(s, t):
+        if t == "cat.a.bad":
+            return {"table": t, "status": "failed", "error": "boom"}
+        return {"table": t, "status": "ok"}
+
+    with patch.object(
+        job, "all_owned_tables", return_value=["cat.a.good", "cat.a.bad"]
+    ), patch.object(job, "drop_table", side_effect=fake_drop) as mock_drop:
+        with pytest.raises(RuntimeError, match="cat.a.bad"):
+            job.drop_all_owned_tables(spark, "portfolio", "stocks")
+
+    # Both tables were attempted despite the failure - one bad table never
+    # blocks dropping the rest.
+    assert mock_drop.call_count == 2
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 def test_entrypoint_passes_explicit_job_parameters() -> None:
@@ -108,6 +164,28 @@ def test_entrypoint_passes_explicit_job_parameters() -> None:
     assert run.call_args.args[1] == "portfolio"
     assert run.call_args.args[2] == "stocks"
     assert run.call_args.kwargs["retain_hours"] == job.DEFAULT_RETENTION_HOURS
+
+
+def test_entrypoint_drops_tables_instead_of_maintaining_when_flagged() -> None:
+    with patch(
+        "sys.argv",
+        [
+            "maintenance",
+            "--catalog",
+            "portfolio",
+            "--schema-prefix",
+            "stocks",
+            "--drop-tables",
+        ],
+    ), patch.object(job, "SparkSession"), patch.object(
+        job, "drop_all_owned_tables"
+    ) as drop, patch.object(
+        job, "run_maintenance"
+    ) as run:
+        job.main()
+    assert drop.call_args.args[1] == "portfolio"
+    assert drop.call_args.args[2] == "stocks"
+    run.assert_not_called()
 
 
 def test_bundle_schedule_ships_paused_by_default() -> None:

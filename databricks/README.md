@@ -302,14 +302,61 @@ tables and whether it's available on Free Edition is unverified.)
 
 `maintain_delta_tables` is the one job in this bundle that runs on a native
 Databricks **schedule** (`databricks.yml`'s `maintenance_cron` variable,
-default 03:00 UTC daily) rather than being manually triggered - every other
-job here processes/publishes business data and is deliberately left
-unscheduled per this project's GitHub-Actions/human-trigger boundary; table
-maintenance has no such data-correctness dependency. The schedule ships with
-`pause_status: PAUSED` (the `maintenance_schedule_status` bundle variable) so
-a plain `bundle deploy` only creates the schedule's definition and never
-silently starts it firing - flipping it to `UNPAUSED` is a separate,
-deliberate action, not the default.
+default 03:00 UTC daily) rather than being triggered by something external -
+every other job here processes/publishes business data, so *when* it runs is
+owned by local Airflow (R8, below) or a human, never GitHub Actions or a
+Databricks-native schedule; table maintenance has no such data-correctness
+dependency. The schedule ships with `pause_status: PAUSED` (the
+`maintenance_schedule_status` bundle variable) so a plain `bundle deploy`
+only creates the schedule's definition and never silently starts it firing -
+flipping it to `UNPAUSED` is a separate, deliberate action, not the default.
+
+## Triggering Job Runs (R8)
+
+GitHub Actions deploys these jobs but must never run or trigger them (see the
+`feedback_github_actions_infra_only` project memory) - per the target
+architecture, **local Airflow** owns triggering. Four DAGs in `dags/` do
+this: `databricks_ticks_pipeline`, `databricks_historical_pipeline`,
+`databricks_indicators_pipeline`, and `databricks_fundamentals_pipeline`
+(originally one combined `databricks_historical_and_indicators_pipeline`
+DAG, split 2026-09-27 - `landed_historical`'s always-full-rebuild design
+needs a much less frequent schedule than `landed_indicators`' daily one; see
+`databricks_historical_pipeline.py`'s docstring). Each triggers its job(s)
+via `DatabricksRunNowOperator` (by `job_name`, with an `idempotency_token`
+derived from the Airflow run ID so a retried task reconnects to an in-flight
+run instead of submitting a duplicate one) and then publishes the resulting
+dataset(s) to Snowflake by calling the existing, already-tested
+`run_export`/`run_load` functions directly - see
+`dags/databricks_pipeline_common.py`.
+
+Neither the trigger nor the publish step retries a *deterministic* failure -
+confirmed live 2026-09-27 that a plain `retries=` setting isn't enough: once
+the Databricks run reaches a genuine terminal `FAILED` state, or
+`run_export`/`run_load` raise their own `ValueError` for a known business-rule
+violation (stale/duplicate batch, schema drift), retrying just replays the
+identical rejection - so both paths re-raise as `AirflowFailException`
+instead, which Airflow never retries. Real retries are reserved for
+genuinely transient submission/polling/network issues, matching
+`databricks.yml`'s own `max_retries: 0` philosophy.
+
+Until manually triggered, `databricks bundle run` from the CLI or the
+workspace UI's "Run now" remain the interim path, as documented above.
+
+Setup: the `databricks_default` Airflow connection is provisioned
+automatically on container start from `.env`'s `DATABRICKS_HOST`/
+`DATABRICKS_TOKEN` (`docker/docker-compose.yaml`'s `airflow-webserver`
+bootstrap command) - no manual connection setup needed once those two
+variables are set locally. All four DAGs ship **paused**
+(`AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true`, same as every existing
+DAG here) - unpausing one is a separate, deliberate action, not a side effect
+of deploying this code. The yfinance 429 issue `databricks_fundamentals_pipeline`
+(and, less certainly, `databricks_historical_pipeline`) would have hit, and a
+separate `ModuleNotFoundError: pydantic_settings` gap in `historical_env`/
+`indicators_env`/`maintenance_env`, are both root-caused and fixed as of
+2026-09-27 (see the handover ledger) - the bundle needs redeploying to pick
+either up before an actual trigger. `databricks_ticks_pipeline` was never
+affected by either; it's been live-verified end-to-end already (trigger,
+short-circuit-on-no-input gate, and publish all confirmed working).
 
 ## Pause and Destroy
 
@@ -318,13 +365,30 @@ and verify job compute terminates. Local Docker/AWS teardown does not stop it.
 Confirm `maintain_delta_tables`'s schedule is still `PAUSED` (its default) before
 tearing down or walking away from this slice - do not unpause it just for a demo.
 
-For explicitly authorized permanent cleanup, cancel active runs before
-`databricks bundle destroy -t dev`. Bundle destruction removes deployed job/assets;
-it does **not** erase external Delta data, checkpoints, catalog/schema objects,
-IAM roles, or workspace/account storage. Drop the five owned UC tables after
-checking their ownership, then remove the dedicated S3 prefixes and all versions
-only when their loss is intended. Coordinate removal of external locations,
-credentials, schemas/catalog, platform identities, and CloudFormation imports in
-dependency order. Pause any local writers before emptying the bucket. Full
-cross-platform destroy automation is still deferred; verify residual compute,
-storage, and retention charges rather than assuming deleting the bundle is enough.
+For explicitly authorized permanent cleanup, use the `Teardown Databricks
+Platform` GitHub Actions workflow (behind a typed `DESTROY` confirmation
+gate). As of 2026-09-27 it automates what used to be manual steps, verified
+against a real audit of every resource this migration creates: it (1) drops
+every Unity Catalog table this migration owns (all bronze/silver/gold/
+pipeline-state tables across all five jobs - via `maintain_delta_tables
+--drop-tables`, reusing the same table registry `databricks_maintenance.py`
+schedules OPTIMIZE/VACUUM against, so a future new table is covered
+automatically) - the Terraform-managed schema/catalog destroy is
+`force_destroy=false` by design and fails outright otherwise; (2) destroys
+the workspace and credential Terraform roots; (3) runs `databricks bundle
+destroy` to remove the 5 deployed job resources and the uploaded wheel
+artifact - previously left silently orphaned after a "teardown"; (4)
+deletes CloudFormation stacks 06 and 05, with a pre-check that refuses to
+proceed if stack 07 (Snowflake's storage role, which also imports one of
+stack 05's exports) still exists, rather than hitting CloudFormation's
+opaque "export in use" error. **Tear down the Snowflake platform first**
+if doing a full project teardown - see `snowflake/README.md`.
+
+None of this erases external Delta data files themselves (dropping an
+external table only removes the Unity Catalog registration - the S3 files
+remain), IAM roles, or workspace/account storage beyond what the automation
+above covers. Remove the dedicated S3 prefixes and all versions only when
+their loss is intended, and pause any local writers before emptying the
+bucket. Verify residual compute, storage, and retention charges rather than
+assuming the automated teardown catches everything - it has never been run
+against a real account (see `docs/implementation-handover.md`'s R9 status).

@@ -227,21 +227,31 @@ Pause: stop local writers, cancel active Databricks runs, and verify job compute
 has terminated. Do not destroy storage or state for an ordinary pause. Retained
 S3/workspace storage can still incur charges.
 
-Full destruction is the intended end-of-project option. After explicit data-loss
-confirmation, perform this dependency order with the privileged setup identity:
+Full destruction is the intended end-of-project option. As of 2026-09-27,
+[teardown-databricks-platform.yaml](../../.github/workflows/teardown-databricks-platform.yaml)
+automates steps 1-4 below (added after a real audit of every resource this
+migration creates found the previous version silently skipped both) - not
+yet run live against a real account. Behind a typed `DESTROY` confirmation gate:
 
-1. Stop local producer/consumer/Airflow and cancel active jobs. Delete the deployed
-   bundle/job/assets with its own tooling; Terraform does not own those objects.
-2. Inventory and drop the five runtime-owned UC external tables plus any deliberate
-   additions. They are absent from Terraform state. Verify schema contents before
-   removal; drop external table metadata does not delete its S3 data.
-3. Review `terraform plan -destroy` in `workspace/` and apply that reviewed plan.
-   Nonempty catalogs/schemas or dependent locations must fail, not force-cascade.
-   This also removes the runtime service principal itself, a Terraform-managed
-   resource in this root, not an externally assigned binding.
-4. Destroy `credential/` after all its external locations are removed. Delete stack
-   `06`, then `05`, before the S3 stack because of exported-policy/bucket imports.
-   Do not delete IAM access while dependent cleanup still needs it.
+1. Drops every Unity Catalog table this migration owns (all bronze/silver/
+   gold/pipeline-state tables across all five jobs, not just five - via
+   `maintain_delta_tables --drop-tables`, reusing the same table registry
+   `databricks_maintenance.py` schedules OPTIMIZE/VACUUM against). Drop
+   external table metadata does not delete its S3 data - that's step 5.
+2. `terraform destroy` in `workspace/`. Fails outright (not a force-cascade)
+   if step 1 missed anything, by design (`force_destroy=false`). Also
+   removes the runtime service principal, a Terraform-managed resource in
+   this root.
+3. `terraform destroy` in `credential/`.
+4. `databricks bundle destroy` (removes the deployed job resources and the
+   uploaded wheel artifact - previously left silently orphaned), then
+   deletes CloudFormation stacks `06` and `05` (with a pre-check that
+   refuses to proceed while stack 07, the Snowflake storage role, still
+   exists and imports one of stack 05's exports - tear down the Snowflake
+   platform first if doing a full project teardown).
+
+Not automated - remains manual, explicit, and outside this repo's tooling:
+
 5. Explicitly remove project S3 objects, noncurrent versions, delete markers, and
    unfinished uploads, then delete the bucket stack. Include dedicated managed
    catalog storage and checkpoints, not only external Delta tables. Check retained
@@ -251,6 +261,5 @@ confirmation, perform this dependency order with the privileged setup identity:
    state/backups until platform destruction is verified, then securely dispose of
    them. Check usage/billing for residual resources and previously incurred charges.
 
-The legacy teardown workflow does not yet automate this order or future Snowflake
-cleanup. Do not run it against a hybrid deployment expecting complete removal.
-No destruction commands have been executed by this implementation step.
+No destruction commands have been executed as of this note - the automation
+above is code-reviewed and unit-tested, not live-verified.

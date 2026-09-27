@@ -1,6 +1,16 @@
 pyspark==3.5.3
 kafka-python==2.0.2
-yfinance==0.2.36
+# yfinance 0.2.66 (up from 0.2.36): 0.2.36 was Edge/CDN-blocked by Yahoo on
+# the very first crumb request - reproduced live from a residential IP too,
+# not just from GitHub Actions/Databricks, so this was never an IP-range
+# rate limit; 0.2.66 (which ships curl_cffi for TLS-fingerprint spoofing)
+# fetched real data on the first attempt. 0.2.66's curl_cffi dependency
+# requires cffi>=2.0, which conflicts with snowflake-connector-python's own
+# declared cffi<2.0 pin below - `pip install` still resolves to a real
+# cffi>=2.0 and everything imports/functions correctly (verified: real
+# cryptography PEM round-trip tests and the full suite both pass), so this
+# is an accepted, tested pip metadata conflict, not a silently ignored one.
+yfinance==0.2.66
 requests==2.31.0
 pydantic==2.6.4
 pydantic-settings==2.2.1

@@ -215,6 +215,12 @@ services:
     volumes:
       - ../dags:/opt/airflow/dags
       - ../src:/opt/airflow/src
+      # src/load/snowflake_snapshot.py resolves its DDL files relative to
+      # the repo root (SQL_DIR = .../parents[2]/"snowflake"/"sql") - the R8
+      # DAGs' export_and_load task calls it directly inside this container,
+      # so it needs this mount too (confirmed missing live 2026-09-27:
+      # FileNotFoundError for snowflake/sql/001_control_batch_ledger.sql).
+      - ../snowflake/sql:/opt/airflow/snowflake/sql
       - airflow-logs:/opt/airflow/logs
     depends_on:
       airflow-postgres:
@@ -224,6 +230,7 @@ services:
       - |
         airflow db migrate
         airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true
+        airflow connections add databricks_default --conn-type databricks --conn-host "$${DATABRICKS_HOST}" --conn-password "$${DATABRICKS_TOKEN}" || true
         exec airflow webserver
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -249,6 +256,7 @@ services:
     volumes:
       - ../dags:/opt/airflow/dags
       - ../src:/opt/airflow/src
+      - ../snowflake/sql:/opt/airflow/snowflake/sql
       - airflow-logs:/opt/airflow/logs
     depends_on:
       airflow-webserver:

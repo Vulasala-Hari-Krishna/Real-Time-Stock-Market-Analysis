@@ -153,7 +153,11 @@ environment) - run these before the next real apply, not just via CI.
 ## Pause and Full Destruction
 
 [teardown-snowflake-platform.yaml](../../.github/workflows/teardown-snowflake-platform.yaml)
-(R9) automates the reverse of the deploy workflow: `terraform destroy` the
+(R9) automates the reverse of the deploy workflow: drop every table the
+loader owns (`python -m src.load.snowflake_snapshot --drop-owned-tables` -
+every dataset's staging/serving table plus `BATCH_LEDGER`, added
+2026-09-27 after a real audit found the workspace destroy would otherwise
+fail outright once the loader had ever run) -> `terraform destroy` the
 `workspace` root (stage/grants/roles/schemas/warehouse/resource monitor) ->
 `terraform destroy` the `bootstrap` root (storage integration) -> delete
 stack `07`. Requires typing `DESTROY` to confirm, and the same
@@ -162,10 +166,14 @@ database/schema/warehouse/role/integration name inputs used at deploy time
 Built after the first real deploy succeeded end to end, so cleanup logic
 matches what actually got created, not what was designed - not yet run live.
 
-The workspace destroy will fail if the loader's tables still hold data (drop
-the staging/serving/`BATCH_LEDGER` tables in Snowflake first if the loader
-has ever run - see [../README.md](../README.md)). Stack `00` (the shared
-Terraform state backend) is deliberately never touched by this workflow;
-delete it manually only after confirming every root using it - both
-Snowflake roots here, and the Databricks credential/workspace roots - has
-been destroyed cleanly.
+**Run this workflow before `Teardown Databricks Platform`** if tearing down
+the whole project: stack `07` (deleted here) is what stack
+`05-hybrid-access.yaml`'s `SnowflakePublishPolicyArn` export is imported
+by, and the Databricks teardown deletes stack 05 as its last step - it now
+has a pre-check that refuses to proceed while stack 07 still exists, rather
+than hitting CloudFormation's opaque "export in use" error, but the correct
+order is still Snowflake first. Stack `00` (the shared Terraform state
+backend) is deliberately never touched by this workflow; delete it
+manually only after confirming every root using it - both Snowflake roots
+here, and the Databricks credential/workspace roots - has been destroyed
+cleanly.

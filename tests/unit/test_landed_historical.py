@@ -88,6 +88,29 @@ def test_fetch_all_history_returns_empty_list_when_everything_fails() -> None:
     assert rows == []
 
 
+def test_fetch_all_history_normalizes_date_to_midnight() -> None:
+    """Regression test: yfinance's daily-bar index carries the exchange's
+    session-open time (e.g. 13:30:00 UTC for NYSE), not midnight - confirmed
+    live 2026-09-27 to break Snowflake's DATE cast on COPY INTO, since
+    (symbol, date) is meant to be one row per trading day, not a specific
+    intraday moment."""
+    exchange_open = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2026-01-02 13:30:00", tz="UTC")],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [1000],
+            "symbol": ["AAPL"],
+        }
+    )
+    with patch.object(lh, "download_history", return_value=exchange_open):
+        rows = lh.fetch_all_history(["AAPL"], sleep=lambda _: None)
+
+    assert rows[0]["date"] == pd.Timestamp("2026-01-02 00:00:00", tz="UTC")
+
+
 # ---------------------------------------------------------------------------
 # Spark expression builders (cloud-free boundary check; real DataFrame
 # semantics are verified separately, same convention as the ticks tests)
@@ -97,6 +120,11 @@ def test_spark_expression_builders_require_no_platform_clients() -> None:
     with patch.object(lh, "F") as functions, patch.object(lh, "Window"):
         lh.rank_latest_per_symbol_date(frame)
         functions.col.assert_any_call("bronze_ingested_at")
+        # Ranks/outputs on date_trunc("day", date), not the raw date column -
+        # see rank_latest_per_symbol_date's docstring for why (old
+        # dirty-timestamp bronze rows vs new midnight-normalized ones must
+        # collide in the same partition, not each "win" their own).
+        functions.date_trunc.assert_any_call("day", functions.col.return_value)
         lh.project_historical(frame)
         frame.select.assert_called_with(
             "symbol", "date", "open", "high", "low", "close", "volume", "source"
