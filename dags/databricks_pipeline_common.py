@@ -14,6 +14,19 @@ safe here, unlike retrying the underlying business logic itself (each
 Databricks job's own ``max_retries: 0`` in ``databricks.yml`` is deliberate,
 for the same reason).
 
+The token is passed via the ``json`` constructor argument, not the operator's
+own ``idempotency_token=`` keyword - confirmed live 2026-09-27 that this
+matters: ``DatabricksRunNowOperator``'s ``template_fields`` only lists
+``("json", "databricks_conn_id")``, so a Jinja expression given to the named
+``idempotency_token`` kwarg is merged into the request at execute() time
+*after* Airflow's templating pass already ran, and is sent to Databricks as
+the literal, unrendered string ``"{{ run_id }}-<job>"`` - identical on every
+run, forever. Every trigger of a given job was silently reusing the same
+token as a result, so every retry (and every later, genuinely new DAG run)
+just replayed one very first run's cached result instead of executing
+anything. Routing the token through ``json={"idempotency_token": ...}``
+puts it inside the one field Airflow does render before execute().
+
 No ``deferrable=True``: that mode needs an ``airflow triggerer`` service,
 which this Docker Compose stack does not run today. Without it, each trigger
 task blocks a worker slot for the job's full runtime - the same trade-off the
@@ -65,7 +78,10 @@ def trigger_databricks_job(
         task_id=task_id,
         databricks_conn_id=DATABRICKS_CONN_ID,
         job_name=job_name(job_short_name),
-        idempotency_token=f"{{{{ run_id }}}}-{job_short_name}",
+        # See module docstring: idempotency_token must go through `json`
+        # (a templated field) to actually get its Jinja expression rendered -
+        # the named idempotency_token= kwarg is not templated at all.
+        json={"idempotency_token": f"{{{{ run_id }}}}-{job_short_name}"},
         execution_timeout=timedelta(seconds=timeout_seconds),
         retries=retries,
     )

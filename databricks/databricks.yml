@@ -146,6 +146,13 @@ resources:
             dependencies:
               - ./dist/*.whl
               - yfinance==0.2.66
+              # landed_historical.py reuses historical_backfill.py::download_history,
+              # and importing that module also executes its top-level
+              # `from src.config.settings import get_settings` (used by that
+              # module's own legacy Spark-session/CLI code, not by
+              # download_history itself) - confirmed live 2026-09-27:
+              # ModuleNotFoundError without this.
+              - pydantic-settings==2.2.1
 
     landed_indicators:
       name: stock-market-hybrid-${bundle.target}-landed-indicators
@@ -178,6 +185,11 @@ resources:
             # table) - only the wheel is needed, no yfinance.
             dependencies:
               - ./dist/*.whl
+              # databricks_indicators.py reuses daily_aggregation.py's
+              # transform functions, and importing that module also executes
+              # its top-level `from src.config.settings import get_settings` -
+              # same gap as historical_env, fixed the same way.
+              - pydantic-settings==2.2.1
 
     maintain_delta_tables:
       name: stock-market-hybrid-${bundle.target}-maintain-delta-tables
@@ -220,6 +232,11 @@ resources:
             # OPTIMIZE/VACUUM only - no external API calls, no yfinance.
             dependencies:
               - ./dist/*.whl
+              # databricks_maintenance.py imports databricks_historical and
+              # databricks_indicators to build its table registry, which
+              # transitively import src.config.settings the same way
+              # historical_env/indicators_env do - same fix.
+              - pydantic-settings==2.2.1
 
 targets:
   dev:
