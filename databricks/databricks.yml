@@ -229,7 +229,8 @@ resources:
         - environment_key: maintenance_env
           spec:
             environment_version: "4"
-            # OPTIMIZE/VACUUM only - no external API calls, no yfinance.
+            # No external API calls of its own, but its import chain still
+            # needs two dependencies it never calls directly:
             dependencies:
               - ./dist/*.whl
               # databricks_maintenance.py imports databricks_historical and
@@ -237,6 +238,14 @@ resources:
               # transitively import src.config.settings the same way
               # historical_env/indicators_env do - same fix.
               - pydantic-settings==2.2.1
+              # databricks_historical.py -> landed_historical.py ->
+              # historical_backfill.py, whose top-level `import yfinance as
+              # yf` (not lazy, unlike landed_fundamentals.py's in-function
+              # import) runs regardless of which function is actually used -
+              # confirmed live 2026-09-27: ModuleNotFoundError without this,
+              # the exact same missed-transitive-dependency pattern as the
+              # pydantic-settings gap above, just a different package.
+              - yfinance==0.2.66
 
 targets:
   dev:

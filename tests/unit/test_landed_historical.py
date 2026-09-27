@@ -120,6 +120,11 @@ def test_spark_expression_builders_require_no_platform_clients() -> None:
     with patch.object(lh, "F") as functions, patch.object(lh, "Window"):
         lh.rank_latest_per_symbol_date(frame)
         functions.col.assert_any_call("bronze_ingested_at")
+        # Ranks/outputs on date_trunc("day", date), not the raw date column -
+        # see rank_latest_per_symbol_date's docstring for why (old
+        # dirty-timestamp bronze rows vs new midnight-normalized ones must
+        # collide in the same partition, not each "win" their own).
+        functions.date_trunc.assert_any_call("day", functions.col.return_value)
         lh.project_historical(frame)
         frame.select.assert_called_with(
             "symbol", "date", "open", "high", "low", "close", "volume", "source"
