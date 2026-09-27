@@ -1,12 +1,13 @@
 """Unit tests for the dashboard's Snowflake historical loader
 (dashboards/snowflake_loader.py, R5)."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
-from dashboards import snowflake_loader as loader
+from dashboards import local_cache, snowflake_loader as loader
 
 
 @pytest.fixture(autouse=True)
@@ -17,6 +18,12 @@ def _clear_streamlit_cache():
     loader._fetch_from_snowflake.clear()
     yield
     loader._fetch_from_snowflake.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_local_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never touch the real .state/dashboard-cache directory in tests."""
+    monkeypatch.setattr(local_cache, "CACHE_DIR", tmp_path / "dashboard-cache")
 
 
 # ---------------------------------------------------------------------------
@@ -148,3 +155,89 @@ def test_load_daily_quote_summary_closes_connection_even_on_query_error(
     assert status.source == "demo"
     assert status.ok is False
     mock_conn.close.assert_called_once()
+
+
+def _mock_connect_with_one_row(mock_connect: MagicMock, batch_id: str) -> None:
+    columns = loader.DASHBOARD_COLUMNS
+    row = (
+        "alpha_vantage",
+        "AAPL",
+        "2026-01-01",
+        150.0,
+        151.0,
+        149.0,
+        150.5,
+        1000,
+        5,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T08:00:00Z",
+        0.33,
+        5,
+        batch_id,
+        pd.Timestamp("2026-01-02T00:00:00Z"),
+    )
+    mock_cursor = MagicMock()
+    mock_cursor.description = [(c,) for c in columns]
+    mock_cursor.fetchall.return_value = [row]
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+
+
+# ---------------------------------------------------------------------------
+# R7: durable local cache interaction
+# ---------------------------------------------------------------------------
+@patch("dashboards.snowflake_loader._connect")
+def test_successful_load_saves_a_local_cache_snapshot(
+    mock_connect: MagicMock,
+) -> None:
+    _mock_connect_with_one_row(mock_connect, batch_id="batch-1")
+
+    loader.load_daily_quote_summary()
+
+    cached = local_cache.load_snapshot(loader.CACHE_DATASET)
+    assert cached is not None
+    cached_df, metadata = cached
+    assert len(cached_df) == 1
+    assert metadata["batch_id"] == "batch-1"
+
+
+@patch("dashboards.snowflake_loader._connect")
+def test_failed_load_prefers_cached_data_over_demo_data(
+    mock_connect: MagicMock,
+) -> None:
+    # First call succeeds and populates the cache.
+    _mock_connect_with_one_row(mock_connect, batch_id="batch-1")
+    loader.load_daily_quote_summary()
+    loader._fetch_from_snowflake.clear()
+
+    # Second call fails - should fall back to the cache, not demo data.
+    mock_connect.side_effect = RuntimeError("connection lost")
+    df, status = loader.load_daily_quote_summary()
+
+    assert status.source == "cache"
+    assert status.ok is False
+    assert status.batch_id == "batch-1"
+    assert "connection lost" in status.message
+    assert len(df) == 1
+
+
+@patch("dashboards.snowflake_loader._connect")
+def test_cache_write_failure_does_not_break_a_successful_load(
+    mock_connect: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A real disk/permissions failure inside save_snapshot's own writes -
+    # save_snapshot is expected to catch this itself (see test_local_cache.py),
+    # this test confirms the caller never depends on that in a way that
+    # would break if it didn't.
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(local_cache.Path, "mkdir", _boom)
+    _mock_connect_with_one_row(mock_connect, batch_id="batch-1")
+
+    df, status = loader.load_daily_quote_summary()
+
+    assert status.source == "snowflake"
+    assert status.ok is True
+    assert len(df) == 1

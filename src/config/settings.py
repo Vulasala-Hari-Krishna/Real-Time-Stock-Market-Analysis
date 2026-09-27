@@ -33,6 +33,23 @@ class Settings(BaseSettings):
         raw_flush_interval_seconds: Maximum normal batch buffering interval.
         raw_max_records: Poll and upload record limit.
         raw_max_batch_bytes: Uncompressed NDJSON limit per upload.
+        databricks_catalog: Unity Catalog catalog the R8 Airflow DAGs read/write.
+        databricks_schema_prefix: Prefix shared by bronze/silver/gold schemas.
+        databricks_bundle_target: Bundle target whose job names the DAGs trigger.
+        snowflake_account: Snowflake account identifier for the R8 loader task.
+        snowflake_loader_role: Least-privilege role used for R8 Snowflake loads.
+        snowflake_warehouse: Warehouse providing compute for R8 Snowflake loads.
+        snowflake_database: Database created by the Snowflake workspace root.
+        snowflake_staging_schema: Schema holding staging + BATCH_LEDGER.
+        snowflake_serving_schema: Schema holding the published serving tables.
+        snowflake_stage_name: Fully-qualified external stage for COPY INTO.
+
+    Secrets these DAGs also need (SNOWFLAKE_USER, SNOWFLAKE_PRIVATE_KEY,
+    SNOWFLAKE_PRIVATE_KEY_PASSPHRASE, DATABRICKS_HOST, DATABRICKS_TOKEN) are
+    deliberately not declared here - they're read directly from os.environ at
+    the point of use (matching src/load/snowflake_snapshot.py's own CLI and
+    dashboards/snowflake_loader.py's existing pattern), never passed through
+    a settings object or logged.
     """
 
     alpha_vantage_api_key: str = ""
@@ -61,6 +78,17 @@ class Settings(BaseSettings):
     raw_max_batch_bytes: int = Field(
         default=5 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024
     )
+
+    databricks_catalog: str = ""
+    databricks_schema_prefix: str = "stocks"
+    databricks_bundle_target: str = "dev"
+    snowflake_account: str = ""
+    snowflake_loader_role: str = ""
+    snowflake_warehouse: str = ""
+    snowflake_database: str = ""
+    snowflake_staging_schema: str = ""
+    snowflake_serving_schema: str = ""
+    snowflake_stage_name: str = ""
 
     # extra="ignore": the shared repo-root .env also carries credentials for
     # other consumers that don't go through this Settings model (e.g. the

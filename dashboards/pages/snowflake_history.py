@@ -33,6 +33,8 @@ def render() -> None:
             f"Live from Snowflake — {len(df)} rows, last loaded {as_of} "
             f"(batch `{status.batch_id}`)."
         )
+    elif status.source == "cache":
+        st.warning(f"⚠️ USING CACHED DATA — real data, but stale. {status.message}")
     else:
         st.error(
             "⚠️ DEMO DATA — this is NOT real data. "

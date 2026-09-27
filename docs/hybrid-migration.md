@@ -21,9 +21,15 @@ Local API producer -> local Kafka -> local raw consumer -> S3 landing
 Local historical/fundamental fetchers ------------------> S3 landing
 S3 landing -> Databricks AvailableNow -> bronze Delta -> silver Delta -> gold Delta
 Gold -> immutable S3 snapshots + completed manifest -> Snowflake tables -> SQL marts
-Local Streamlit -> Snowflake historical analytics / planned local live-data cache
-Local Airflow -> Databricks run -> validate publication -> Snowflake load/reconcile
+Local Streamlit -> Snowflake historical analytics / durable local live-data cache (R7)
+Local Airflow -> Databricks run -> validate publication -> Snowflake load/reconcile (R8)
 ```
+
+R7 and R8 are implemented in code (`dashboards/local_cache.py`;
+`dags/databricks_ticks_pipeline.py`, `dags/databricks_historical_and_indicators_pipeline.py`,
+`dags/databricks_fundamentals_pipeline.py`) and verified against a local
+Airflow container rebuild - see the handover ledger for what "verified" means
+here (DAG parsing/connection provisioning, not a live triggered run).
 
 The consumer persists source messages; Databricks owns canonical cleaning and
 indicators. Snowflake owns dimensional/reporting SQL, not duplicate indicator

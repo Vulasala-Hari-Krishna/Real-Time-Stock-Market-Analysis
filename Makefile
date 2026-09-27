@@ -21,12 +21,12 @@ test: ## Run unit tests with coverage
 	pytest tests/unit -v --cov=src --cov-report=term-missing --cov-fail-under=80
 
 lint: ## Run linters (ruff, mypy)
-	ruff check src/ tests/
-	mypy src/ --ignore-missing-imports
+	ruff check src/ tests/ dags/
+	mypy src/ dags/ --ignore-missing-imports
 
 format: ## Auto-format code with black and ruff
-	black src/ tests/
-	ruff check --fix src/ tests/
+	black src/ tests/ dags/
+	ruff check --fix src/ tests/ dags/
 
 deploy: ## Deploy AWS infrastructure via CloudFormation
 	bash cloudformation/deploy-all.sh

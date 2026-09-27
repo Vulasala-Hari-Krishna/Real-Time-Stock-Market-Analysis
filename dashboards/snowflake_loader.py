@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from dashboards import local_cache
 from dashboards.data_loader import SYMBOLS
 
 logger = logging.getLogger(__name__)
@@ -50,11 +51,14 @@ class LoadStatus:
     """Explicit outcome of one load - always shown to the viewer, never
     swallowed silently the way a bare demo-data fallback would be."""
 
-    source: str  # "snowflake" | "demo"
+    source: str  # "snowflake" | "cache" | "demo"
     ok: bool
     message: str
     as_of: Optional[datetime] = None
     batch_id: Optional[str] = None
+
+
+CACHE_DATASET = "daily_quote_summary"
 
 
 def _private_key_der(pem_text: str, passphrase: Optional[str]) -> bytes:
@@ -127,9 +131,16 @@ def _generate_demo_daily_quote_summary() -> pd.DataFrame:
     n_days = 60
     dates = pd.bdate_range(end=datetime.now(timezone.utc).date(), periods=n_days)
     base_prices = {
-        "AAPL": 175.0, "MSFT": 420.0, "GOOGL": 155.0, "AMZN": 185.0,
-        "TSLA": 250.0, "META": 500.0, "NVDA": 880.0, "JPM": 195.0,
-        "V": 280.0, "JNJ": 155.0,
+        "AAPL": 175.0,
+        "MSFT": 420.0,
+        "GOOGL": 155.0,
+        "AMZN": 185.0,
+        "TSLA": 250.0,
+        "META": 500.0,
+        "NVDA": 880.0,
+        "JPM": 195.0,
+        "V": 280.0,
+        "JNJ": 155.0,
     }
     rows = []
     for symbol in SYMBOLS:
@@ -139,23 +150,26 @@ def _generate_demo_daily_quote_summary() -> pd.DataFrame:
             price *= 1 + rng.normal(0.0004, 0.012)
             high = max(open_price, price) * (1 + rng.uniform(0, 0.004))
             low = min(open_price, price) * (1 - rng.uniform(0, 0.004))
-            rows.append({
-                "provider": "demo",
-                "symbol": symbol,
-                "capture_date_utc": date.date(),
-                "first_observed_price": round(open_price, 2),
-                "highest_observed_price": round(high, 2),
-                "lowest_observed_price": round(low, 2),
-                "last_observed_price": round(price, 2),
-                "last_reported_volume": int(rng.integers(200_000, 3_000_000)),
-                "quote_count": int(rng.integers(20, 200)),
-                "first_quote_at": pd.Timestamp(date, tz="UTC"),
-                "last_quote_at": pd.Timestamp(date, tz="UTC") + pd.Timedelta(hours=8),
-                "observed_change_pct": round((price / open_price - 1) * 100, 4),
-                "bronze_version": None,
-                "loaded_batch_id": "demo",
-                "loaded_at": pd.Timestamp.now(tz="UTC"),
-            })
+            rows.append(
+                {
+                    "provider": "demo",
+                    "symbol": symbol,
+                    "capture_date_utc": date.date(),
+                    "first_observed_price": round(open_price, 2),
+                    "highest_observed_price": round(high, 2),
+                    "lowest_observed_price": round(low, 2),
+                    "last_observed_price": round(price, 2),
+                    "last_reported_volume": int(rng.integers(200_000, 3_000_000)),
+                    "quote_count": int(rng.integers(20, 200)),
+                    "first_quote_at": pd.Timestamp(date, tz="UTC"),
+                    "last_quote_at": pd.Timestamp(date, tz="UTC")
+                    + pd.Timedelta(hours=8),
+                    "observed_change_pct": round((price / open_price - 1) * 100, 4),
+                    "bronze_version": None,
+                    "loaded_batch_id": "demo",
+                    "loaded_at": pd.Timestamp.now(tz="UTC"),
+                }
+            )
     return pd.DataFrame(rows, columns=DASHBOARD_COLUMNS)
 
 
@@ -164,8 +178,10 @@ def load_daily_quote_summary() -> tuple[pd.DataFrame, LoadStatus]:
 
     Returns:
         The data, and an explicit LoadStatus the caller must render as a
-        visible banner - on failure this is demo data clearly labelled
-        source="demo", ok=False, never data that looks like a real result.
+        visible banner. On failure this prefers the last known-good local
+        cache (source="cache", ok=False - real data, just stale) over
+        synthetic demo data; demo data (source="demo", ok=False) is only
+        used when no cache exists yet, and is never presented as real.
     """
     try:
         df = _fetch_from_snowflake()
@@ -179,6 +195,9 @@ def load_daily_quote_summary() -> tuple[pd.DataFrame, LoadStatus]:
             if "loaded_batch_id" in df.columns and not df.empty
             else None
         )
+        local_cache.save_snapshot(
+            CACHE_DATASET, df, {"as_of": as_of, "batch_id": batch_id}
+        )
         return df, LoadStatus(
             source="snowflake",
             ok=True,
@@ -188,6 +207,20 @@ def load_daily_quote_summary() -> tuple[pd.DataFrame, LoadStatus]:
         )
     except Exception as exc:
         logger.exception("Snowflake historical load failed")
+        cached = local_cache.load_snapshot(CACHE_DATASET)
+        if cached is not None:
+            cached_df, metadata = cached
+            as_of = metadata.get("as_of")
+            return cached_df, LoadStatus(
+                source="cache",
+                ok=False,
+                message=(
+                    f"Snowflake unavailable ({exc}); showing cached data "
+                    f"from {as_of}"
+                ),
+                as_of=pd.to_datetime(as_of) if as_of else None,
+                batch_id=metadata.get("batch_id"),
+            )
         return _generate_demo_daily_quote_summary(), LoadStatus(
             source="demo",
             ok=False,

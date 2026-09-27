@@ -302,14 +302,43 @@ tables and whether it's available on Free Edition is unverified.)
 
 `maintain_delta_tables` is the one job in this bundle that runs on a native
 Databricks **schedule** (`databricks.yml`'s `maintenance_cron` variable,
-default 03:00 UTC daily) rather than being manually triggered - every other
-job here processes/publishes business data and is deliberately left
-unscheduled per this project's GitHub-Actions/human-trigger boundary; table
-maintenance has no such data-correctness dependency. The schedule ships with
-`pause_status: PAUSED` (the `maintenance_schedule_status` bundle variable) so
-a plain `bundle deploy` only creates the schedule's definition and never
-silently starts it firing - flipping it to `UNPAUSED` is a separate,
-deliberate action, not the default.
+default 03:00 UTC daily) rather than being triggered by something external -
+every other job here processes/publishes business data, so *when* it runs is
+owned by local Airflow (R8, below) or a human, never GitHub Actions or a
+Databricks-native schedule; table maintenance has no such data-correctness
+dependency. The schedule ships with `pause_status: PAUSED` (the
+`maintenance_schedule_status` bundle variable) so a plain `bundle deploy`
+only creates the schedule's definition and never silently starts it firing -
+flipping it to `UNPAUSED` is a separate, deliberate action, not the default.
+
+## Triggering Job Runs (R8)
+
+GitHub Actions deploys these jobs but must never run or trigger them (see the
+`feedback_github_actions_infra_only` project memory) - per the target
+architecture, **local Airflow** owns triggering. Three DAGs in `dags/` do
+this: `databricks_ticks_pipeline`, `databricks_historical_and_indicators_pipeline`,
+and `databricks_fundamentals_pipeline`. Each triggers its job(s) via
+`DatabricksRunNowOperator` (by `job_name`, with an `idempotency_token` derived
+from the Airflow run ID so a retried task reconnects to an in-flight run
+instead of submitting a duplicate one) and then publishes the resulting
+dataset(s) to Snowflake by calling the existing, already-tested
+`run_export`/`run_load` functions directly - see
+`dags/databricks_pipeline_common.py`.
+
+Until manually triggered, `databricks bundle run` from the CLI or the
+workspace UI's "Run now" remain the interim path, as documented above.
+
+Setup: the `databricks_default` Airflow connection is provisioned
+automatically on container start from `.env`'s `DATABRICKS_HOST`/
+`DATABRICKS_TOKEN` (`docker/docker-compose.yaml`'s `airflow-webserver`
+bootstrap command) - no manual connection setup needed once those two
+variables are set locally. All three DAGs ship **paused**
+(`AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true`, same as every existing
+DAG here) - unpausing one is a separate, deliberate action, not a side effect
+of deploying this code. `databricks_historical_and_indicators_pipeline` and
+`databricks_fundamentals_pipeline` will hit the still-unresolved yfinance 429
+issue (see the handover ledger) if actually triggered; `databricks_ticks_pipeline`
+is not affected by that blocker.
 
 ## Pause and Destroy
 
