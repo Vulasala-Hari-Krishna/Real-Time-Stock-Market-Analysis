@@ -4,6 +4,17 @@
 # and only after removing dependent Unity Catalog external locations/credentials
 # in Databricks (terraform destroy of the workspace/credential roots, or manual
 # deletion in the workspace UI). This script does not touch Databricks itself.
+#
+# IMPORTANT: stack 05 exports TWO policy ARNs - DatabricksStoragePolicyArn
+# (imported by stack 06, deleted by this same script) AND
+# SnowflakePublishPolicyArn (imported by stack 07, the Snowflake storage
+# role - a SEPARATE stack this script does not touch). If stack 07 still
+# exists when this script deletes stack 05, CloudFormation will refuse with
+# an "export in use" error. Tear down the Snowflake platform (which deletes
+# stack 07) BEFORE running this script if this is a full project teardown -
+# the 'Teardown Snowflake Platform' GitHub Actions workflow already
+# enforces this ordering with a pre-check when run through it; this script
+# itself does not re-check it when run standalone.
 # Usage: ./teardown-hybrid.sh [dev|prod]
 set -euo pipefail
 

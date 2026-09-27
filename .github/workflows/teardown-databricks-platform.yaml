@@ -1,10 +1,12 @@
 name: Teardown Databricks Platform
 
-# Reverse of deploy-databricks-platform.yaml: destroys the workspace
-# Terraform root, then the credential root, then CloudFormation stacks 06
-# and 05. Requires the SAME catalog/schema_prefix/credential_name inputs
-# used at deploy time, because Terraform must recompute the same resource
-# addresses to know what to destroy.
+# Reverse of deploy-databricks-platform.yaml: drops every owned Unity
+# Catalog table, destroys the workspace Terraform root, then the credential
+# root, removes the deployed bundle (jobs + wheel artifact), then
+# CloudFormation stacks 06 and 05. Requires the SAME
+# catalog/schema_prefix/credential_name inputs used at deploy time, because
+# Terraform must recompute the same resource addresses to know what to
+# destroy.
 #
 # Deliberately does NOT touch stack 00 (the Terraform state bucket/lock
 # table): that resource is what this very pipeline depends on, and it uses
@@ -12,10 +14,25 @@ name: Teardown Databricks Platform
 # bucket, delete the bucket, delete the DynamoDB table) only after
 # confirming both Terraform roots destroyed cleanly.
 #
-# The workspace-objects destroy will FAIL if the catalog/schemas still
-# contain tables (force_destroy=false, by design) - drop the five
-# runtime-owned Unity Catalog tables in Databricks first if the job has
-# ever actually run.
+# The workspace-objects destroy FAILS if the catalog/schemas still contain
+# tables (force_destroy=false, by design) - confirmed live 2026-09-27, not
+# theoretical, once any job has actually run. The drop-owned-tables job
+# below handles this automatically now via `maintain_delta_tables
+# --drop-tables` (the same already-deployed job `databricks_maintenance.py`
+# schedules for OPTIMIZE/VACUUM) - triggering it here, from GitHub Actions,
+# is a deliberate, considered exception to the "GitHub Actions never
+# triggers a job run" rule (see the `feedback_github_actions_infra_only`
+# project memory): `maintain_delta_tables` is infrastructure housekeeping,
+# not business logic - it's already the one job in this bundle allowed a
+# native schedule for exactly that reason - and a full teardown is
+# unambiguously an infra operation. Dropping the catalog registrations is a
+# means to that end, not a business-data run; every other job (ticks,
+# fundamentals, historical, indicators) is still never triggered here.
+#
+# `databricks bundle destroy` (new, near the end) removes the 5 deployed
+# job resources and the uploaded wheel artifact - confirmed live 2026-09-27
+# that without this, "teardown" left them silently orphaned in the
+# workspace after the Terraform-managed platform was gone.
 
 on:
   workflow_dispatch:
@@ -122,10 +139,34 @@ jobs:
             --output text)
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
 
+  drop-owned-tables:
+    name: Drop Unity Catalog tables (via maintain_delta_tables --drop-tables)
+    runs-on: ubuntu-latest
+    needs: read-state-backend
+    environment: ${{ inputs.environment }}
+    env:
+      BUNDLE_VAR_catalog: ${{ inputs.catalog }}
+      BUNDLE_VAR_schema_prefix: ${{ inputs.schema_prefix }}
+      BUNDLE_VAR_bucket: ${{ needs.read-state-backend.outputs.data_bucket }}
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: databricks/setup-cli@main
+
+      - name: databricks bundle run maintain_delta_tables -- --drop-tables
+        working-directory: databricks
+        run: |
+          databricks bundle run -t dev maintain_delta_tables -- \
+            --catalog "${{ inputs.catalog }}" \
+            --schema-prefix "${{ inputs.schema_prefix }}" \
+            --drop-tables
+
   destroy-workspace-objects:
     name: 'Terraform: destroy workspace root'
     runs-on: ubuntu-latest
-    needs: read-state-backend
+    needs: [read-state-backend, drop-owned-tables]
     environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
@@ -197,10 +238,30 @@ jobs:
             -var="credential_name=${{ inputs.credential_name }}" \
             -var="storage_role_arn=${{ needs.read-state-backend.outputs.storage_role_arn }}"
 
+  bundle-destroy:
+    name: databricks bundle destroy (removes deployed jobs + wheel artifact)
+    runs-on: ubuntu-latest
+    needs: [read-state-backend, destroy-credential]
+    environment: ${{ inputs.environment }}
+    env:
+      BUNDLE_VAR_catalog: ${{ inputs.catalog }}
+      BUNDLE_VAR_schema_prefix: ${{ inputs.schema_prefix }}
+      BUNDLE_VAR_bucket: ${{ needs.read-state-backend.outputs.data_bucket }}
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: databricks/setup-cli@main
+
+      - name: databricks bundle destroy
+        working-directory: databricks
+        run: databricks bundle destroy -t dev --auto-approve
+
   teardown-hybrid-stacks:
     name: Teardown Hybrid Stacks (06, 05)
     runs-on: ubuntu-latest
-    needs: destroy-credential
+    needs: bundle-destroy
     environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
@@ -210,6 +271,25 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ inputs.aws-region }}
+
+      - name: Refuse to delete stack 05 while stack 07 still imports its export
+        run: |
+          # Stack 05 exports both DatabricksStoragePolicyArn (imported by
+          # stack 06, already destroyed above) AND SnowflakePublishPolicyArn
+          # (imported by stack 07, the Snowflake storage role) - confirmed
+          # live via `aws cloudformation list-exports`/stack 07's own
+          # template. If stack 07 still exists, CloudFormation will refuse
+          # to delete stack 05 with an opaque "export in use" error -
+          # failing clearly here instead, before that confusing error, and
+          # before 06 leaves a half-torn-down state.
+          STACK="stock-market-pipeline-07-snowflake-storage-role-${{ inputs.environment }}"
+          if aws cloudformation describe-stacks --stack-name "${STACK}" --region "${{ inputs.aws-region }}" >/dev/null 2>&1; then
+            echo "ERROR: Stack ${STACK} still exists, and it imports stack 05's"
+            echo "SnowflakePublishPolicyArn export. Deleting stack 05 now would fail."
+            echo "Run 'Teardown Snowflake Platform' first (it destroys stack 07),"
+            echo "then re-run this workflow."
+            exit 1
+          fi
 
       - name: Teardown stacks 06 and 05
         run: |

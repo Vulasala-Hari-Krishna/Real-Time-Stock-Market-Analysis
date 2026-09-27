@@ -365,13 +365,30 @@ and verify job compute terminates. Local Docker/AWS teardown does not stop it.
 Confirm `maintain_delta_tables`'s schedule is still `PAUSED` (its default) before
 tearing down or walking away from this slice - do not unpause it just for a demo.
 
-For explicitly authorized permanent cleanup, cancel active runs before
-`databricks bundle destroy -t dev`. Bundle destruction removes deployed job/assets;
-it does **not** erase external Delta data, checkpoints, catalog/schema objects,
-IAM roles, or workspace/account storage. Drop the five owned UC tables after
-checking their ownership, then remove the dedicated S3 prefixes and all versions
-only when their loss is intended. Coordinate removal of external locations,
-credentials, schemas/catalog, platform identities, and CloudFormation imports in
-dependency order. Pause any local writers before emptying the bucket. Full
-cross-platform destroy automation is still deferred; verify residual compute,
-storage, and retention charges rather than assuming deleting the bundle is enough.
+For explicitly authorized permanent cleanup, use the `Teardown Databricks
+Platform` GitHub Actions workflow (behind a typed `DESTROY` confirmation
+gate). As of 2026-09-27 it automates what used to be manual steps, verified
+against a real audit of every resource this migration creates: it (1) drops
+every Unity Catalog table this migration owns (all bronze/silver/gold/
+pipeline-state tables across all five jobs - via `maintain_delta_tables
+--drop-tables`, reusing the same table registry `databricks_maintenance.py`
+schedules OPTIMIZE/VACUUM against, so a future new table is covered
+automatically) - the Terraform-managed schema/catalog destroy is
+`force_destroy=false` by design and fails outright otherwise; (2) destroys
+the workspace and credential Terraform roots; (3) runs `databricks bundle
+destroy` to remove the 5 deployed job resources and the uploaded wheel
+artifact - previously left silently orphaned after a "teardown"; (4)
+deletes CloudFormation stacks 06 and 05, with a pre-check that refuses to
+proceed if stack 07 (Snowflake's storage role, which also imports one of
+stack 05's exports) still exists, rather than hitting CloudFormation's
+opaque "export in use" error. **Tear down the Snowflake platform first**
+if doing a full project teardown - see `snowflake/README.md`.
+
+None of this erases external Delta data files themselves (dropping an
+external table only removes the Unity Catalog registration - the S3 files
+remain), IAM roles, or workspace/account storage beyond what the automation
+above covers. Remove the dedicated S3 prefixes and all versions only when
+their loss is intended, and pause any local writers before emptying the
+bucket. Verify residual compute, storage, and retention charges rather than
+assuming the automated teardown catches everything - it has never been run
+against a real account (see `docs/implementation-handover.md`'s R9 status).

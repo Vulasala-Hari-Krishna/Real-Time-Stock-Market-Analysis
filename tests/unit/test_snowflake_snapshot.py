@@ -592,3 +592,106 @@ def test_run_load_marks_ledger_failed_when_copy_raises(
     mock_publish.assert_not_called()
     mock_fail.assert_called_once()
     assert mock_fail.call_args.args[2] == "batch-3"
+
+
+# ---------------------------------------------------------------------------
+# all_owned_snowflake_tables / drop_all_owned_tables (teardown only, R9)
+# ---------------------------------------------------------------------------
+def test_all_owned_snowflake_tables_covers_every_dataset_and_the_ledger(
+    config: loader.SnowflakeLoadConfig,
+) -> None:
+    tables = loader.all_owned_snowflake_tables(config)
+
+    assert "STOCK_MARKET_DEV.PUBLISH_STAGING.BATCH_LEDGER" in tables
+    for dataset in loader.DATASET_STAGING_TABLE:
+        staging = loader.DATASET_STAGING_TABLE[dataset]
+        serving = loader.DATASET_SERVING_TABLE[dataset]
+        assert f"STOCK_MARKET_DEV.PUBLISH_STAGING.{staging}" in tables
+        assert f"STOCK_MARKET_DEV.SERVING.{serving}" in tables
+    # No duplicates - every owned table appears exactly once.
+    assert len(tables) == len(set(tables))
+
+
+def test_drop_all_owned_tables_drops_every_table(
+    config: loader.SnowflakeLoadConfig,
+) -> None:
+    cursor = FakeCursor()
+    conn = FakeConnection(cursor)
+
+    results = loader.drop_all_owned_tables(conn, config)
+
+    expected_tables = loader.all_owned_snowflake_tables(config)
+    executed_sql = [sql for sql, _ in cursor.executed]
+    for table in expected_tables:
+        assert f"DROP TABLE IF EXISTS {table}" in executed_sql
+        assert results[table] == {"table": table, "status": "ok"}
+    assert cursor.closed
+
+
+def test_drop_all_owned_tables_attempts_every_table_then_raises_if_any_failed(
+    config: loader.SnowflakeLoadConfig,
+) -> None:
+    cursor = FakeCursor()
+    conn = FakeConnection(cursor)
+    bad_table = loader.all_owned_snowflake_tables(config)[0]
+
+    def fake_execute(sql: str, params: tuple = ()) -> None:
+        cursor.executed.append((sql, params))
+        if bad_table in sql:
+            raise RuntimeError("boom")
+
+    cursor.execute = fake_execute  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match=r"Dropping failed for 1 table"):
+        loader.drop_all_owned_tables(conn, config)
+
+    # Every table was still attempted despite the one failure.
+    assert len(cursor.executed) == len(loader.all_owned_snowflake_tables(config))
+
+
+def test_parse_args_requires_dataset_bucket_stage_unless_dropping_owned_tables() -> (
+    None
+):
+    with pytest.raises(SystemExit):
+        loader._parse_args(
+            [
+                "--account",
+                "a",
+                "--user",
+                "u",
+                "--role",
+                "r",
+                "--warehouse",
+                "w",
+                "--database",
+                "d",
+                "--staging-schema",
+                "s1",
+                "--serving-schema",
+                "s2",
+            ]
+        )
+
+
+def test_parse_args_allows_drop_owned_tables_without_dataset_bucket_stage() -> None:
+    args = loader._parse_args(
+        [
+            "--account",
+            "a",
+            "--user",
+            "u",
+            "--role",
+            "r",
+            "--warehouse",
+            "w",
+            "--database",
+            "d",
+            "--staging-schema",
+            "s1",
+            "--serving-schema",
+            "s2",
+            "--drop-owned-tables",
+        ]
+    )
+    assert args.drop_owned_tables is True
+    assert args.dataset is None

@@ -32,6 +32,15 @@ shortcut.
 The job's own bundle schedule ships PAUSED by default (see
 databricks/databricks.yml) - `bundle deploy` never silently starts a live
 recurring cron job; unpausing it is a separate, deliberate action.
+
+Also home to ``drop_all_owned_tables`` - a teardown-only operation (see
+``--drop-tables``), not part of the scheduled maintenance path. R9's
+teardown workflow needs it because the Terraform-managed schema/catalog
+destroy is deliberately `force_destroy=false`, so it fails outright if any
+owned table is still registered in Unity Catalog - confirmed live
+2026-09-27 this is a real, not just theoretical, blocker once any job has
+actually run. Reuses the same ``all_owned_tables`` registry, so a future new
+table is covered here automatically too, same as maintenance.
 """
 
 import argparse
@@ -157,6 +166,68 @@ def run_maintenance(
     return results
 
 
+def drop_table(spark: SparkSession, table: str) -> dict[str, str]:
+    """Unregister one table from Unity Catalog; never raises.
+
+    ``DROP TABLE`` on an external table (all of ours are) only removes the
+    catalog registration - it does not delete the underlying S3 Delta
+    files (confirmed live 2026-09-26, the DELTA_METADATA_MISMATCH incident
+    in the handover ledger). Deleting the actual data is a separate, larger,
+    explicitly-confirmed action, never implied by this function.
+
+    Returns:
+        ``{"table": ..., "status": "ok"}`` or
+        ``{"table": ..., "status": "failed", "error": ...}`` - a failure on
+        one table never raises, so it never blocks dropping the rest.
+    """
+    try:
+        logger.info("Dropping table %s", table)
+        spark.sql(f"DROP TABLE IF EXISTS {table}")
+        return {"table": table, "status": "ok"}
+    except Exception as exc:
+        logger.exception("Drop failed for %s", table)
+        return {"table": table, "status": "failed", "error": str(exc)}
+
+
+def drop_all_owned_tables(
+    spark: SparkSession, catalog: str, schema_prefix: str
+) -> dict[str, dict[str, str]]:
+    """Unregister every owned table from Unity Catalog - teardown only.
+
+    Exists so R9's teardown workflow can make the Terraform-managed
+    schema/catalog destroy (``force_destroy=false``, by design) actually
+    succeed once any job has run and populated tables - otherwise that
+    destroy fails outright, confirmed live 2026-09-27, not theoretical.
+    Never run as part of the scheduled maintenance path (see module
+    docstring) - only via ``--drop-tables`` from a teardown workflow, which
+    itself sits behind a typed ``DESTROY`` confirmation gate.
+
+    Args:
+        spark: Runtime session.
+        catalog: Existing Unity Catalog catalog.
+        schema_prefix: Prefix shared by every job's bronze/silver/gold schemas.
+
+    Returns:
+        One result dict per table, keyed by its fully-qualified name.
+
+    Raises:
+        RuntimeError: If any table's drop failed - after attempting every
+            table, so a real failure is never silently swallowed, but one
+            bad table also never prevents dropping the rest.
+    """
+    results = {
+        table: drop_table(spark, table)
+        for table in all_owned_tables(catalog, schema_prefix)
+    }
+    failed = [t for t, r in results.items() if r["status"] == "failed"]
+    logger.info(
+        "Drop complete: %d/%d tables ok", len(results) - len(failed), len(results)
+    )
+    if failed:
+        raise RuntimeError(f"Dropping failed for {len(failed)} table(s): {failed}")
+    return results
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True)
@@ -170,6 +241,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "168-hour (7-day) safety floor - this is not bypassed."
         ),
     )
+    parser.add_argument(
+        "--drop-tables",
+        action="store_true",
+        help=(
+            "Teardown-only: unregister every owned table from Unity Catalog "
+            "instead of running OPTIMIZE/VACUUM. Never used by the scheduled "
+            "job - only by a teardown workflow, behind its own confirmation gate."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -180,12 +260,13 @@ def main() -> None:
     # code ever runs, and basicConfig() silently no-ops if the root logger
     # already has handlers (found live 2026-09-26 in databricks_fundamentals.py).
     logging.basicConfig(level=logging.INFO, force=True)
-    run_maintenance(
-        SparkSession.builder.getOrCreate(),
-        args.catalog,
-        args.schema_prefix,
-        retain_hours=args.retain_hours,
-    )
+    spark = SparkSession.builder.getOrCreate()
+    if args.drop_tables:
+        drop_all_owned_tables(spark, args.catalog, args.schema_prefix)
+    else:
+        run_maintenance(
+            spark, args.catalog, args.schema_prefix, retain_hours=args.retain_hours
+        )
 
 
 if __name__ == "__main__":

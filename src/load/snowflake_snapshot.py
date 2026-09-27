@@ -273,6 +273,72 @@ def connect(
     )
 
 
+def all_owned_snowflake_tables(config: SnowflakeLoadConfig) -> list[str]:
+    """Enumerate every table this migration's Snowflake loader owns.
+
+    Every registered dataset's staging + serving table, plus the shared
+    control table (``BATCH_LEDGER``) - gathered from the same registries
+    ``copy_into_staging``/``ensure_objects_exist`` use, so a future new
+    dataset is covered here automatically too.
+    """
+    names = [config.qualified(config.staging_schema, "BATCH_LEDGER")]
+    for dataset in DATASET_STAGING_TABLE:
+        names.append(
+            config.qualified(config.staging_schema, DATASET_STAGING_TABLE[dataset])
+        )
+        names.append(
+            config.qualified(config.serving_schema, DATASET_SERVING_TABLE[dataset])
+        )
+    return names
+
+
+def drop_all_owned_tables(
+    conn: Any, config: SnowflakeLoadConfig
+) -> dict[str, dict[str, str]]:
+    """``DROP TABLE IF EXISTS`` every table this migration owns - teardown only.
+
+    Exists so R9's teardown workflow can make the Terraform-managed
+    schema/database destroy actually succeed - confirmed live 2026-09-27
+    that dropping the schema/database while it still holds tables the
+    loader created is a real blocker, not theoretical, once the loader has
+    ever run. Never called from ``run_load``'s own normal path - only via
+    ``--drop-owned-tables`` from a teardown workflow, which itself sits
+    behind a typed ``DESTROY`` confirmation gate.
+
+    Args:
+        conn: An open Snowflake connection (see ``connect``).
+        config: Identifies the database/staging/serving schemas to target.
+
+    Returns:
+        One result dict per table, keyed by its fully-qualified name.
+
+    Raises:
+        RuntimeError: If any table's drop failed - after attempting every
+            table, so a real failure is never silently swallowed, but one
+            bad table also never prevents dropping the rest.
+    """
+    cursor = conn.cursor()
+    try:
+        results: dict[str, dict[str, str]] = {}
+        for table in all_owned_snowflake_tables(config):
+            try:
+                logger.info("Dropping table %s", table)
+                cursor.execute(f"DROP TABLE IF EXISTS {table}")
+                results[table] = {"table": table, "status": "ok"}
+            except Exception as exc:
+                logger.exception("Drop failed for %s", table)
+                results[table] = {"table": table, "status": "failed", "error": str(exc)}
+    finally:
+        cursor.close()
+    failed = [t for t, r in results.items() if r["status"] == "failed"]
+    logger.info(
+        "Drop complete: %d/%d tables ok", len(results) - len(failed), len(results)
+    )
+    if failed:
+        raise RuntimeError(f"Dropping failed for {len(failed)} table(s): {failed}")
+    return results
+
+
 def find_latest_batch_id(bucket: str, prefix: str = "publish/batches/") -> str | None:
     """Return the most recent batch_id with a completed manifest, if any.
 
@@ -693,17 +759,47 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--serving-schema", required=True)
     parser.add_argument(
         "--stage-name",
-        required=True,
-        help="Fully-qualified external stage, e.g. DATABASE.SCHEMA.STAGE_NAME",
+        default=None,
+        help=(
+            "Fully-qualified external stage, e.g. DATABASE.SCHEMA.STAGE_NAME - "
+            "required unless --drop-owned-tables"
+        ),
     )
-    parser.add_argument("--bucket", required=True)
-    parser.add_argument("--dataset", required=True)
+    parser.add_argument(
+        "--bucket", default=None, help="required unless --drop-owned-tables"
+    )
+    parser.add_argument(
+        "--dataset", default=None, help="required unless --drop-owned-tables"
+    )
     parser.add_argument(
         "--batch-id",
         default=None,
         help="Explicit batch to load; defaults to the latest completed batch",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--drop-owned-tables",
+        action="store_true",
+        help=(
+            "Teardown-only: DROP every table this loader owns (every "
+            "dataset's staging/serving table plus BATCH_LEDGER) instead of "
+            "loading a batch. --stage-name/--bucket/--dataset are not "
+            "needed in this mode."
+        ),
+    )
+    args = parser.parse_args(argv)
+    if not args.drop_owned_tables:
+        missing = [
+            flag
+            for flag, value in (
+                ("--stage-name", args.stage_name),
+                ("--bucket", args.bucket),
+                ("--dataset", args.dataset),
+            )
+            if value is None
+        ]
+        if missing:
+            parser.error(f"the following arguments are required: {', '.join(missing)}")
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -719,12 +815,25 @@ def main(argv: list[str] | None = None) -> None:
         database=args.database,
         staging_schema=args.staging_schema,
         serving_schema=args.serving_schema,
-        stage_name=args.stage_name,
-        bucket=args.bucket,
-        dataset=args.dataset,
+        # Placeholder values in --drop-owned-tables mode: this operation
+        # only ever touches staging_schema/serving_schema/database, but the
+        # model's fields are required/pattern-validated regardless.
+        stage_name=args.stage_name or "UNUSED",
+        bucket=args.bucket or "unused-bucket-placeholder",
+        dataset=args.dataset or "unused",
     )
     private_key_pem = os.environ["SNOWFLAKE_PRIVATE_KEY"]
     passphrase = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE") or None
+
+    if args.drop_owned_tables:
+        conn = connect(config, private_key_pem, passphrase)
+        try:
+            results = drop_all_owned_tables(conn, config)
+        finally:
+            conn.close()
+        logger.info("Drop result: %s", results)
+        return
+
     result = run_load(
         config,
         private_key_pem,
