@@ -1,4 +1,8 @@
-"""Opt-in lossless Kafka landing, separate from the legacy silver consumer."""
+"""Lossless Kafka landing - the sole bridge from local Kafka into S3
+landing/ticks/, consumed by Databricks Auto Loader and by the dashboard's
+live-ticks reader. Gated by RAW_LANDING_ENABLED/RAW_SOURCE_ID (see
+Settings), not by a Docker Compose profile - the raw-consumer service runs
+by default."""
 
 import base64
 import gzip

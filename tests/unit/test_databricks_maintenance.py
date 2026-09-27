@@ -209,3 +209,8 @@ def test_bundle_schedule_ships_paused_by_default() -> None:
         package["project"]["scripts"]["maintain_delta_tables"]
         == "src.batch.databricks_maintenance:main"
     )
+    # Legacy delta_maintenance.py's actual cadence is a weekly Sunday cron
+    # gated by a last-Sunday-of-month short-circuit, not literally weekly -
+    # "1L" (Quartz day-of-week, 1=SUN convention) reproduces that effective
+    # monthly cadence natively, no separate gate task needed.
+    assert bundle["variables"]["maintenance_cron"]["default"] == "0 0 4 ? * 1L"

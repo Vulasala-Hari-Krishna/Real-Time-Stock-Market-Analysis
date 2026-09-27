@@ -5,9 +5,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from dashboards.data_loader import (
-    SECTOR_MAP,
-    SYMBOLS,
+from dashboards.data_loader import SECTOR_MAP, SYMBOLS
+from dashboards.load_status import render_status_banner
+from dashboards.snowflake_loader import (
     load_correlations,
     load_daily_summaries,
     load_sector_performance,
@@ -24,7 +24,9 @@ def _sector_heatmap(sector_df: pd.DataFrame) -> go.Figure:
         Plotly Figure.
     """
     pivot = sector_df.pivot_table(
-        index="sector", columns="date", values="avg_return_pct",
+        index="sector",
+        columns="date",
+        values="avg_return_pct",
     )
     fig = px.imshow(
         pivot,
@@ -60,7 +62,8 @@ def _correlation_matrix(corr_df: pd.DataFrame) -> go.Figure:
     fig = px.imshow(
         matrix.astype(float),
         color_continuous_scale="RdBu_r",
-        zmin=-1, zmax=1,
+        zmin=-1,
+        zmax=1,
         labels={"color": "Correlation"},
         title="Stock Correlation Matrix",
     )
@@ -80,8 +83,12 @@ def _gainers_losers(summaries: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame
     latest = summaries.sort_values("date").groupby("symbol").tail(1).copy()
     latest["sector"] = latest["symbol"].map(SECTOR_MAP)
     latest = latest.sort_values("daily_return_pct", ascending=False)
-    gainers = latest.head(5)[["symbol", "sector", "close", "daily_return_pct"]].reset_index(drop=True)
-    losers = latest.tail(5)[["symbol", "sector", "close", "daily_return_pct"]].reset_index(drop=True)
+    gainers = latest.head(5)[
+        ["symbol", "sector", "close", "daily_return_pct"]
+    ].reset_index(drop=True)
+    losers = latest.tail(5)[
+        ["symbol", "sector", "close", "daily_return_pct"]
+    ].reset_index(drop=True)
     return gainers, losers
 
 
@@ -90,9 +97,19 @@ def render() -> None:
     st.header("Sector Analysis")
 
     with st.spinner("Loading data…"):
-        sector_df = load_sector_performance()
-        summaries = load_daily_summaries()
-        corr_df = load_correlations()
+        sector_df, sector_status = load_sector_performance()
+        summaries, summaries_status = load_daily_summaries()
+        corr_df, corr_status = load_correlations()
+
+    # Only surface the worst of the three statuses - three simultaneous
+    # banners for one page load is noisier than useful, and any non-ok
+    # status still must not go unmentioned.
+    for status in (sector_status, summaries_status, corr_status):
+        if not status.ok:
+            render_status_banner(status)
+            break
+    else:
+        render_status_banner(sector_status)
 
     # --------------- Sector heatmap ---------------
     if not sector_df.empty:
@@ -118,7 +135,9 @@ def render() -> None:
             st.markdown("**Top 5 Gainers**")
             st.dataframe(
                 gainers.style.map(
-                    lambda v: "color: green" if isinstance(v, (int, float)) and v > 0 else "",
+                    lambda v: (
+                        "color: green" if isinstance(v, (int, float)) and v > 0 else ""
+                    ),
                     subset=["daily_return_pct"],
                 ),
                 use_container_width=True,
@@ -128,7 +147,9 @@ def render() -> None:
             st.markdown("**Top 5 Losers**")
             st.dataframe(
                 losers.style.map(
-                    lambda v: "color: red" if isinstance(v, (int, float)) and v < 0 else "",
+                    lambda v: (
+                        "color: red" if isinstance(v, (int, float)) and v < 0 else ""
+                    ),
                     subset=["daily_return_pct"],
                 ),
                 use_container_width=True,

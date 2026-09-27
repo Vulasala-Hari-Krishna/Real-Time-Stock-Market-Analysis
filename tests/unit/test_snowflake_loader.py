@@ -9,6 +9,28 @@ import pytest
 
 from dashboards import local_cache, snowflake_loader as loader
 
+# Column order the daily_quote_summary demo generator/SERVING table use -
+# no longer exported as a module constant now that snowflake_loader.py is
+# generic across datasets, so the tests that need a fixed row shape define
+# it locally.
+DAILY_QUOTE_SUMMARY_COLUMNS = [
+    "provider",
+    "symbol",
+    "capture_date_utc",
+    "first_observed_price",
+    "highest_observed_price",
+    "lowest_observed_price",
+    "last_observed_price",
+    "last_reported_volume",
+    "quote_count",
+    "first_quote_at",
+    "last_quote_at",
+    "observed_change_pct",
+    "bronze_version",
+    "loaded_batch_id",
+    "loaded_at",
+]
+
 
 @pytest.fixture(autouse=True)
 def _clear_streamlit_cache():
@@ -72,12 +94,12 @@ def test_generate_demo_data_has_expected_columns_and_is_deterministic() -> None:
     first = loader._generate_demo_daily_quote_summary()
     second = loader._generate_demo_daily_quote_summary()
 
-    assert list(first.columns) == loader.DASHBOARD_COLUMNS
+    assert list(first.columns) == DAILY_QUOTE_SUMMARY_COLUMNS
     assert not first.empty
     assert set(first["symbol"].unique()) == set(loader.SYMBOLS)
     # loaded_at is wall-clock "when this demo batch was generated", not
     # part of the deterministic price/volume series - compare everything else.
-    compare_columns = [c for c in loader.DASHBOARD_COLUMNS if c != "loaded_at"]
+    compare_columns = [c for c in DAILY_QUOTE_SUMMARY_COLUMNS if c != "loaded_at"]
     pd.testing.assert_frame_equal(first[compare_columns], second[compare_columns])
 
 
@@ -88,7 +110,7 @@ def test_generate_demo_data_has_expected_columns_and_is_deterministic() -> None:
 def test_load_daily_quote_summary_returns_snowflake_status_on_success(
     mock_connect: MagicMock,
 ) -> None:
-    columns = loader.DASHBOARD_COLUMNS
+    columns = DAILY_QUOTE_SUMMARY_COLUMNS
     rows = [
         (
             "alpha_vantage",
@@ -158,7 +180,7 @@ def test_load_daily_quote_summary_closes_connection_even_on_query_error(
 
 
 def _mock_connect_with_one_row(mock_connect: MagicMock, batch_id: str) -> None:
-    columns = loader.DASHBOARD_COLUMNS
+    columns = DAILY_QUOTE_SUMMARY_COLUMNS
     row = (
         "alpha_vantage",
         "AAPL",
@@ -195,7 +217,7 @@ def test_successful_load_saves_a_local_cache_snapshot(
 
     loader.load_daily_quote_summary()
 
-    cached = local_cache.load_snapshot(loader.CACHE_DATASET)
+    cached = local_cache.load_snapshot("daily_quote_summary")
     assert cached is not None
     cached_df, metadata = cached
     assert len(cached_df) == 1
@@ -220,6 +242,44 @@ def test_failed_load_prefers_cached_data_over_demo_data(
     assert status.batch_id == "batch-1"
     assert "connection lost" in status.message
     assert len(df) == 1
+
+
+# ---------------------------------------------------------------------------
+# Generalization across the other registered datasets - one representative
+# dataset is enough to prove the registry-driven mechanism works; every
+# other dataset goes through the identical load_dataset() code path.
+# ---------------------------------------------------------------------------
+@patch("dashboards.snowflake_loader._connect")
+def test_load_daily_summaries_queries_its_own_serving_table(
+    mock_connect: MagicMock,
+) -> None:
+    mock_cursor = MagicMock()
+    mock_cursor.description = [("SYMBOL",), ("DATE",), ("CLOSE",)]
+    mock_cursor.fetchall.return_value = [("AAPL", "2026-01-01", 150.0)]
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+
+    df, status = loader.load_daily_summaries()
+
+    mock_cursor.execute.assert_called_once_with("SELECT * FROM DAILY_SUMMARIES")
+    assert status.source == "snowflake"
+    assert status.ok is True
+    assert list(df.columns) == ["symbol", "date", "close"]
+    assert pd.api.types.is_datetime64_any_dtype(df["date"])
+
+
+@patch("dashboards.snowflake_loader._connect")
+def test_load_daily_summaries_falls_back_to_its_own_demo_shape(
+    mock_connect: MagicMock,
+) -> None:
+    mock_connect.side_effect = RuntimeError("unavailable")
+
+    df, status = loader.load_daily_summaries()
+
+    assert status.source == "demo"
+    assert not df.empty
+    assert "sector" in df.columns  # daily_summaries-specific demo shape
 
 
 @patch("dashboards.snowflake_loader._connect")

@@ -4,16 +4,16 @@ Triggers the deployed ``landed_historical`` Databricks job (multi-year OHLCV
 backfill), then publishes its gold output (``historical_ohlcv``) to
 Snowflake.
 
-Split out from what was originally a single combined
-``databricks_historical_and_indicators_pipeline`` DAG (2026-09-27): that DAG
-ran daily, matching ``landed_indicators``'s natural cadence but not this
-job's. ``landed_historical`` always does a full 5-year, 10-symbol rebuild (a
-deliberate "always rebuild" simplification, not incremental like the legacy
-``daily_tick_rollup.py``) - closer in nature to the legacy
-``initial_historical_backfill.py``'s one-time full fetch than to a cheap
-daily append, so running it daily was needlessly heavy. Scheduled weekly
-instead - frequent enough to pick up retroactive split/dividend corrections,
-far cheaper than daily.
+**Manual trigger only, no schedule** (changed 2026-09-27): now that
+``databricks_ticks_rollup_pipeline`` exists to cheaply sync already-captured
+data into ``historical_ohlcv`` on a daily/weekdays schedule at zero extra
+fetch cost, this job's own always-full 5-year yfinance re-fetch has no
+reason to run on any recurring cadence of its own - exactly mirroring legacy,
+where ``initial_historical_backfill.py`` (this job's hybrid equivalent) is
+also manual/one-time-or-rare-deliberate-rebackfill, with ``daily_tick_rollup.py``
+(``databricks_ticks_rollup_pipeline``'s hybrid equivalent) owning the daily
+sync instead. Trigger by hand only for the initial backfill or a deliberate
+full rebuild (e.g. after a retroactive split/dividend correction).
 
 **Known blocker**: ``landed_historical`` fetches via yfinance, and briefly
 also failed on a missing ``pydantic-settings`` dependency in
@@ -42,7 +42,7 @@ default_args = {
 @dag(
     dag_id="databricks_historical_pipeline",
     description="Trigger landed_historical on Databricks, then publish to Snowflake",
-    schedule="0 5 * * 0",
+    schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,

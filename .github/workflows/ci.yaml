@@ -26,13 +26,13 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Ruff check
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ dags/ dashboards/
 
       - name: Black check
-        run: black --check src/ tests/
+        run: black --check src/ tests/ dags/ dashboards/
 
       - name: MyPy check
-        run: mypy src/ --ignore-missing-imports
+        run: mypy src/ dags/ --ignore-missing-imports
 
   test:
     name: Unit Tests

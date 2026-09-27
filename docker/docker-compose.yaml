@@ -78,11 +78,10 @@ services:
         condition: service_completed_successfully
 
   raw-consumer:
-    profiles: ["hybrid-raw"]
     build:
       context: ..
       dockerfile: docker/raw-consumer/Dockerfile
-    restart: "no"
+    restart: unless-stopped
     env_file:
       - ../.env
     environment:
@@ -102,77 +101,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-  spark-master:
-    build:
-      context: ..
-      dockerfile: docker/spark-cluster/Dockerfile
-    container_name: stock-spark-master
-    hostname: spark-master
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-      - "7077:7077"
-    environment:
-      SPARK_MASTER_HOST: spark-master
-      SPARK_MASTER_PORT: 7077
-      SPARK_MASTER_WEBUI_PORT: 8080
-    volumes:
-      - spark-data:/opt/spark/work-dir
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-
-  spark-worker:
-    build:
-      context: ..
-      dockerfile: docker/spark-cluster/Dockerfile
-    container_name: stock-spark-worker
-    hostname: spark-worker
-    restart: unless-stopped
-    ports:
-      - "8082:8082"
-    environment:
-      SPARK_WORKER_MEMORY: 4g
-      SPARK_WORKER_CORES: 4
-      SPARK_WORKER_WEBUI_PORT: 8082
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
-    depends_on:
-      spark-master:
-        condition: service_healthy
-
-  spark-streaming:
-    build:
-      context: ..
-      dockerfile: docker/spark-jobs/Dockerfile
-    container_name: stock-spark-streaming
-    restart: unless-stopped
-    env_file:
-      - ../.env
-    environment:
-      KAFKA_BROKER: kafka:29092
-      SPARK_MASTER_URL: spark://spark-master:7077
-      PYTHONPATH: /app
-    depends_on:
-      spark-master:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-    command:
-      - "--master"
-      - "spark://spark-master:7077"
-      - "--packages"
-      - "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.apache.kafka:kafka-clients:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
-      - "--conf"
-      - "spark.executorEnv.PYTHONPATH=/app"
-      - "--total-executor-cores"
-      - "1"
-      - "--executor-memory"
-      - "512m"
-      - "/app/src/consumers/spark_streaming.py"
 
   # ---------------------------------------------------------------
   # Airflow services
@@ -297,7 +225,6 @@ volumes:
   zookeeper-data:
   zookeeper-logs:
   kafka-data:
-  spark-data:
   airflow-postgres-data:
   airflow-logs:
   raw-landing-state:

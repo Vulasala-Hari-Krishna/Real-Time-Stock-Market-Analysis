@@ -1,8 +1,6 @@
-"""Integration test — S3 write / read round-trip.
+"""Integration test — S3 JSON upload and OHLCV data-shape invariants.
 
-Verifies that data can be written to S3 as Parquet, read back, and that
-the schema and contents survive the round-trip. Uses ``unittest.mock``
-to stub out real S3 calls so the test is hermetic.
+Uses ``unittest.mock`` to stub out real S3 calls so the test is hermetic.
 
 Marked with ``pytest.mark.integration``.
 
@@ -11,22 +9,13 @@ Run with:
     pytest tests/integration -v -m integration
 """
 
-import io
-from datetime import date
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-import pyarrow.parquet as pq
 import pytest
 from botocore.exceptions import ClientError
 
-from src.common.s3_utils import (
-    generate_s3_key,
-    read_parquet_from_s3,
-    upload_json_to_s3,
-    upload_parquet_to_s3,
-)
-
+from src.common.s3_utils import upload_json_to_s3
 
 pytestmark = pytest.mark.integration
 
@@ -36,7 +25,9 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture()
 def sample_ohlcv_df() -> pd.DataFrame:
-    """A small OHLCV DataFrame for round-trip testing."""
+    """A small OHLCV DataFrame for data-shape invariant testing."""
+    from datetime import date
+
     return pd.DataFrame(
         {
             "symbol": ["AAPL", "AAPL", "MSFT"],
@@ -52,7 +43,7 @@ def sample_ohlcv_df() -> pd.DataFrame:
 
 @pytest.fixture()
 def sample_json_data() -> dict:
-    """A sample JSON record for bronze upload testing."""
+    """A sample JSON record for upload testing."""
     return {
         "symbol": "AAPL",
         "price": 178.5,
@@ -60,29 +51,6 @@ def sample_json_data() -> dict:
         "timestamp": "2024-03-15T14:30:00Z",
         "source": "alpha_vantage",
     }
-
-
-# ── S3 key generation tests ────────────────────────────────────────────
-
-
-class TestS3KeyGeneration:
-    """Verify S3 key paths follow the medallion convention."""
-
-    def test_bronze_key_format(self) -> None:
-        key = generate_s3_key("bronze", "stock_ticks", date(2024, 3, 15), "AAPL")
-        assert "bronze" in key
-        assert "year=2024" in key
-        assert "month=03" in key
-        assert "AAPL" in key
-
-    def test_silver_key_format(self) -> None:
-        key = generate_s3_key("silver", "historical", date(2024, 3, 15), "MSFT")
-        assert "silver" in key
-        assert "MSFT" in key
-
-    def test_gold_key_includes_layer(self) -> None:
-        key = generate_s3_key("gold", "daily_summaries", date(2024, 3, 15))
-        assert key.startswith("gold/")
 
 
 # ── JSON upload tests ───────────────────────────────────────────────────
@@ -100,7 +68,7 @@ class TestJsonUpload:
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
 
-        result = upload_json_to_s3(sample_json_data, "test-bucket", "bronze/test.json")
+        result = upload_json_to_s3(sample_json_data, "test-bucket", "landing/test.json")
         assert result is True
         mock_client.put_object.assert_called_once()
 
@@ -117,136 +85,8 @@ class TestJsonUpload:
         )
         mock_get_client.return_value = mock_client
 
-        result = upload_json_to_s3(sample_json_data, "test-bucket", "bronze/test.json")
+        result = upload_json_to_s3(sample_json_data, "test-bucket", "landing/test.json")
         assert result is False
-
-
-# ── Parquet upload tests ────────────────────────────────────────────────
-
-
-class TestParquetUpload:
-    """Test Parquet upload to S3 with mocked boto3."""
-
-    @patch("src.common.s3_utils.get_s3_client")
-    def test_upload_parquet_success(
-        self,
-        mock_get_client: MagicMock,
-        sample_ohlcv_df: pd.DataFrame,
-    ) -> None:
-        mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
-
-        result = upload_parquet_to_s3(
-            sample_ohlcv_df, "test-bucket", "silver/test.parquet"
-        )
-        assert result is True
-        mock_client.put_object.assert_called_once()
-        call_kwargs = mock_client.put_object.call_args
-        # Verify Parquet bytes were written
-        body = call_kwargs.kwargs.get("Body") or call_kwargs[1].get("Body")
-        assert body is not None
-        assert len(body) > 0
-
-    @patch("src.common.s3_utils.get_s3_client")
-    def test_upload_parquet_preserves_schema(
-        self,
-        mock_get_client: MagicMock,
-        sample_ohlcv_df: pd.DataFrame,
-    ) -> None:
-        captured_body = None
-        mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
-
-        def capture_put(**kwargs):
-            nonlocal captured_body
-            captured_body = kwargs.get("Body")
-
-        mock_client.put_object.side_effect = capture_put
-
-        upload_parquet_to_s3(sample_ohlcv_df, "test-bucket", "silver/test.parquet")
-
-        # Read back the captured Parquet bytes to verify schema
-        assert captured_body is not None
-        table = pq.read_table(io.BytesIO(captured_body))
-        schema_names = {f.name for f in table.schema}
-        assert "symbol" in schema_names
-        assert "close" in schema_names
-        assert len(table) == 3
-
-
-# ── Parquet read tests ──────────────────────────────────────────────────
-
-
-class TestParquetRead:
-    """Test reading Parquet back from S3."""
-
-    @patch("src.common.s3_utils.get_s3_client")
-    def test_read_parquet_returns_dataframe(
-        self,
-        mock_get_client: MagicMock,
-        sample_ohlcv_df: pd.DataFrame,
-    ) -> None:
-        # Create real Parquet bytes from the sample
-        buf = io.BytesIO()
-        sample_ohlcv_df.to_parquet(buf, index=False)
-        parquet_bytes = buf.getvalue()
-
-        mock_client = MagicMock()
-        mock_body = MagicMock()
-        mock_body.read.return_value = parquet_bytes
-        mock_client.get_object.return_value = {"Body": mock_body}
-        mock_get_client.return_value = mock_client
-
-        result = read_parquet_from_s3("test-bucket", "silver/test.parquet")
-        assert result is not None
-        assert isinstance(result, pd.DataFrame)
-        assert len(result) == 3
-        assert list(result.columns) == list(sample_ohlcv_df.columns)
-
-    @patch("src.common.s3_utils.get_s3_client")
-    def test_read_parquet_missing_key_returns_none(
-        self,
-        mock_get_client: MagicMock,
-    ) -> None:
-        mock_client = MagicMock()
-        mock_client.get_object.side_effect = ClientError(
-            {"Error": {"Code": "NoSuchKey", "Message": "Not found"}},
-            "GetObject",
-        )
-        mock_get_client.return_value = mock_client
-
-        result = read_parquet_from_s3("test-bucket", "silver/missing.parquet")
-        assert result is None
-
-    @patch("src.common.s3_utils.get_s3_client")
-    def test_round_trip_preserves_data(
-        self,
-        mock_get_client: MagicMock,
-        sample_ohlcv_df: pd.DataFrame,
-    ) -> None:
-        """Write → read round-trip preserves all values."""
-        stored = {}
-        mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
-
-        def store_put(**kwargs):
-            stored["body"] = kwargs.get("Body")
-
-        mock_client.put_object.side_effect = store_put
-
-        upload_parquet_to_s3(sample_ohlcv_df, "test-bucket", "silver/rt.parquet")
-
-        # Now read back
-        mock_body = MagicMock()
-        mock_body.read.return_value = stored["body"]
-        mock_client.get_object.return_value = {"Body": mock_body}
-
-        result = read_parquet_from_s3("test-bucket", "silver/rt.parquet")
-        assert result is not None
-        pd.testing.assert_frame_equal(
-            result.reset_index(drop=True),
-            sample_ohlcv_df.reset_index(drop=True),
-        )
 
 
 # ── Data integrity tests ───────────────────────────────────────────────

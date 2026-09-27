@@ -10,8 +10,14 @@ variables:
   bucket:
     description: Existing S3 bucket with governed landing/lakehouse/checkpoint access
   maintenance_cron:
-    description: Quartz cron expression for scheduled OPTIMIZE+VACUUM (default 03:00 UTC daily, off-peak for a personal single-user account)
-    default: "0 0 3 * * ?"
+    description: >-
+      Quartz cron expression for scheduled OPTIMIZE+VACUUM. Default fires
+      04:00 UTC on the last Sunday of every month ("1L" = last Sunday,
+      day-of-month must be "?" when day-of-week uses "L") - matches legacy
+      delta_maintenance.py's actual effective cadence (a weekly Sunday cron
+      gated by a last-Sunday-of-month short-circuit), not a literal weekly
+      or daily run.
+    default: "0 0 4 ? * 1L"
   maintenance_schedule_status:
     description: >-
       PAUSED (default) or UNPAUSED. Ships PAUSED deliberately: a plain
@@ -153,6 +159,59 @@ resources:
               # download_history itself) - confirmed live 2026-09-27:
               # ModuleNotFoundError without this.
               - pydantic-settings==2.2.1
+
+    landed_ticks_rollup:
+      name: stock-market-hybrid-${bundle.target}-landed-ticks-rollup
+      description: >-
+        Scheduled sync of landed_ticks' already-published daily_quote_summary
+        into historical_ohlcv - zero external API calls, mirrors legacy
+        tick_rollup.py's exact role and weekdays-06:00-UTC cadence. The other
+        feeder of historical_ohlcv/historical_ohlcv_raw besides
+        landed_historical's manual/rare yfinance backfill (serverless compute).
+      max_concurrent_runs: 1
+      timeout_seconds: 900
+      queue:
+        enabled: false
+      # UNPAUSED by default, unlike maintain_delta_tables: this is a cheap,
+      # zero-external-API-call sync (no yfinance rate-limit or cost risk),
+      # exactly mirroring legacy tick_rollup.py's own always-on weekdays
+      # schedule - there is no equivalent "ships paused" concern here.
+      schedule:
+        quartz_cron_expression: "0 0 6 ? * 2-6"
+        timezone_id: "UTC"
+        pause_status: "UNPAUSED"
+      tasks:
+        - task_key: rollup_ticks_into_historical
+          environment_key: ticks_rollup_env
+          timeout_seconds: 900
+          max_retries: 0
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: stock_market_hybrid
+            entry_point: landed_ticks_rollup
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema-prefix
+              - ${var.schema_prefix}
+              - --bucket
+              - ${var.bucket}
+      environments:
+        - environment_key: ticks_rollup_env
+          spec:
+            environment_version: "4"
+            # Never calls yfinance directly (reads daily_quote_summary, not
+            # the external API), but its import chain still needs both of
+            # these, the same transitive pattern as historical_env/
+            # maintenance_env above:
+            dependencies:
+              - ./dist/*.whl
+              # databricks_ticks_rollup.py imports landed_historical.py for
+              # its ranking/projection helpers, which transitively imports
+              # historical_backfill.py - top-level `import yfinance as yf`
+              # and `from src.config.settings import get_settings`.
+              - pydantic-settings==2.2.1
+              - yfinance==0.2.66
 
     landed_indicators:
       name: stock-market-hybrid-${bundle.target}-landed-indicators

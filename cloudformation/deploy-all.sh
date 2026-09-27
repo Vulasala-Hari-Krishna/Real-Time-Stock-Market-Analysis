@@ -21,9 +21,7 @@ echo "============================================="
 
 STACKS=(
     "01-s3-datalake"
-    "02-glue-catalog"
     "03-iam-roles"
-    "04-athena-workgroup"
 )
 
 deploy_stack() {

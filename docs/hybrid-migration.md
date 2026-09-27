@@ -7,32 +7,35 @@ the target architecture and data contracts; platform guides own detailed runbook
 
 ## Status and Scope
 
-This is the target contract for incremental work on
-`feature/databricks_snowflake_impl`, not a description of deployed cloud services.
-The [README](../README.md) documents the existing local workflow. This first step
-prepared storage/access templates and the contracts below. The next local slice
-now implements an opt-in raw consumer and tests without replacing the legacy
-silver path. A [manual Databricks slice](../databricks/README.md) is also implemented
-for bronze envelopes, silver validated quote samples/quarantine, and gold sampled
-daily summaries. No resources, credentials, or cloud schedules have been deployed.
+This document now describes the deployed, live-verified architecture, not a
+future target - the Databricks/Snowflake migration finished (R1-R9 all done,
+every job/DAG/dataset triggered and confirmed with real data at least once)
+and the legacy local Kafka/Spark/Airflow pipeline it replaced was retired on
+2026-09-28 (local Spark cluster, its batch jobs' standalone execution, the
+Airflow DAGs that `spark-submit`ted them, and the AWS Glue/Athena querying
+stack). See the [handover ledger](implementation-handover.md)'s change log
+for the full verification and retirement history.
 
 ```text
 Local API producer -> local Kafka -> local raw consumer -> S3 landing
 Local historical/fundamental fetchers ------------------> S3 landing
 S3 landing -> Databricks AvailableNow -> bronze Delta -> silver Delta -> gold Delta
 Gold -> immutable S3 snapshots + completed manifest -> Snowflake tables -> SQL marts
-Local Streamlit -> Snowflake historical analytics / durable local live-data cache (R7)
-Local Airflow -> Databricks run -> validate publication -> Snowflake load/reconcile (R8)
+Local Streamlit -> Snowflake historical analytics + durable local live-data cache
+                 -> S3 landing/ticks/ directly, for the Live Data page
+Local Airflow -> Databricks run -> export/load -> Snowflake SERVING.*
 ```
 
-R7 and R8 are implemented in code (`dashboards/local_cache.py`;
-`dags/databricks_ticks_pipeline.py`, `dags/databricks_historical_pipeline.py`,
-`dags/databricks_indicators_pipeline.py`, `dags/databricks_fundamentals_pipeline.py`)
-and live-verified: `databricks_ticks_pipeline` has actually been triggered
-and succeeded end to end (including its short-circuit-on-no-input gate); the
-other three are deployed and paused, pending a bundle redeploy to pick up
-fixes found only by triggering them for real - see the handover ledger for
-the full story.
+Every piece of this diagram is implemented and live-verified: the local raw
+consumer runs by default (no opt-in profile gate); every Databricks job has
+been triggered for real; every Airflow DAG (`dags/databricks_ticks_pipeline.py`,
+`dags/databricks_ticks_rollup_pipeline.py`,
+`dags/databricks_indicators_pipeline.py`,
+`dags/databricks_fundamentals_pipeline.py`,
+`dags/databricks_historical_pipeline.py`) has run successfully end to end;
+the dashboard's local cache (`dashboards/local_cache.py`) and its live
+S3-landing reader (`dashboards/landing_reader.py`) are both wired into every
+relevant page - see the handover ledger for the full verification history.
 
 The consumer persists source messages; Databricks owns canonical cleaning and
 indicators. Snowflake owns dimensional/reporting SQL, not duplicate indicator
@@ -46,18 +49,16 @@ contracts, not directories that CloudFormation must create.
 
 | Prefix | Format and owner | Retention in this step |
 |--------|------------------|------------------------|
-| `bronze/`, `silver/`, `gold/` | Legacy raw JSON, silver Parquet, gold Delta | Existing raw bronze 30-day expiry remains; gold cold-tier transition removed |
 | `landing/ticks/` | Consumer-written gzip NDJSON envelopes | No automatic expiry |
 | `landing/historical/`, `landing/fundamentals/` | Local source snapshots with extraction metadata | No automatic expiry; dataset schemas defined with each ingestion slice |
 | `lakehouse/bronze/`, `lakehouse/silver/`, `lakehouse/gold/` | Databricks Delta tables registered in Unity Catalog | No object lifecycle expiry or storage-class transition |
 | `checkpoints/hybrid/` | Per-query checkpoints and Auto Loader schema state | No lifecycle cleanup |
-| `publish/` | Immutable per-batch Parquet snapshots and JSON manifests | No automatic expiry |
+| `publish/` | Immutable per-batch Parquet snapshots and JSON manifests | 30-day expiry (added 2026-09-27) - Snowflake's `COPY INTO` only ever reads the single batch named in its own manifest, so nothing depends on a batch surviving past the run that consumed it |
 
 The [S3 template](../cloudformation/01-s3-datalake.yaml) exports the four hybrid
 root URIs and denies non-TLS requests. It aborts incomplete multipart uploads
-after seven days only under `landing/` and `publish/`; completed objects are not
-expired. Removing the old transition does not move already transitioned gold
-objects back to Standard. Versioning remains enabled.
+after seven days under both `landing/` and `publish/`; `publish/` additionally
+expires completed batches after 30 days (see above). Versioning remains enabled.
 
 No expiry is a conservative bootstrap default, not a permanent retention policy.
 Before long-running capture, choose raw/export retention covering the longest
@@ -68,7 +69,9 @@ files, never generic S3 expiration of active data or transaction logs.
 
 ## Raw Tick Contract v1
 
-The opt-in [raw consumer](../src/consumers/raw_landing.py) writes gzip-compressed newline-delimited
+The [raw consumer](../src/consumers/raw_landing.py) - the sole bridge from
+Kafka into the rest of the pipeline since the legacy Spark silver consumer
+was retired - writes gzip-compressed newline-delimited
 JSON, one envelope per Kafka record, including malformed payloads and tombstones.
 All instants use UTC ISO 8601 with an explicit timezone.
 
@@ -97,18 +100,14 @@ never overwrite a completed object with different bytes. Durably track pending
 batches and advance Kafka progress only after successful S3 persistence. This is
 at-least-once transport with downstream deduplication, not an exactly-once claim.
 
-Producer API backups remain in the legacy path and are not a second Auto Loader
-input for ticks. Preserve the old silver-writing consumer until the raw path is
-tested and explicitly selected. Use separate consumer groups/checkpoints for a
-side-by-side comparison; do not let two modes compete for the same offsets.
-
 ## Running the Raw Consumer
 
-The legacy Spark silver path remains the default. The raw path requires no Spark
-and is a separate process using the existing kafka-python/boto3 dependencies.
-It is excluded from default Compose startup and exits without creating clients
-unless `RAW_LANDING_ENABLED=true`. `RUN_PIPELINE`/`MAX_ITERATIONS` still control
-the producer, not this consumer; stop the consumer explicitly when finished.
+This consumer requires no Spark - a separate process using the existing
+kafka-python/boto3 dependencies. It runs by default in Docker Compose (no
+profile gate), but still exits without creating clients unless
+`RAW_LANDING_ENABLED=true` (the `.env.example` default) and `RAW_SOURCE_ID`
+is set. `RUN_PIPELINE`/`MAX_ITERATIONS` still control the producer, not this
+consumer; stop the consumer explicitly when finished.
 
 Before running against AWS, authorize deployment/access, ensure the bucket
 exists, and configure a dedicated identity with the landing policy. Templates
@@ -120,20 +119,20 @@ Set these values in the ignored `.env` (see [the example](../.env.example)):
 
 | Setting | Default and meaning |
 |---------|---------------------|
-| `RAW_LANDING_ENABLED` | `false`; set `true` only when intentionally starting capture |
-| `RAW_SOURCE_ID` | Empty; required stable source-incarnation ID such as `local-kafka-v1` |
-| `RAW_CONSUMER_GROUP` | `stock-raw-landing-v1`; keep independent of legacy readers |
+| `RAW_LANDING_ENABLED` | `false` in `Settings` (safe library default); `.env.example` sets `true` since this consumer is now the primary path, not opt-in |
+| `RAW_SOURCE_ID` | Required stable source-incarnation ID such as `local-kafka-v1` |
+| `RAW_CONSUMER_GROUP` | `stock-raw-landing-v1` |
 | `RAW_TOPIC` | `raw_stock_ticks` |
 | `RAW_SPOOL_PATH` | `.state/raw-landing.sqlite3` on the host; named volume path in Docker |
 | `RAW_FLUSH_INTERVAL_SECONDS` | `60`; normal buffering interval, not an upload latency SLA |
 | `RAW_MAX_RECORDS` | `500`; per-poll and per-object record limit |
 | `RAW_MAX_BATCH_BYTES` | `5242880`; uncompressed envelope bytes per object, not compressed bytes |
 
-Start only the raw consumer and its local Kafka dependencies when ready; this
-does not launch Spark, the producer, Airflow, Databricks, or Snowflake:
+The raw consumer starts along with every other local service via `make start`
+/ `docker compose up -d`; to start only it and its Kafka dependencies:
 
 ```bash
-docker compose -f docker/docker-compose.yaml --profile hybrid-raw up --build -d raw-consumer
+docker compose -f docker/docker-compose.yaml up --build -d raw-consumer
 docker compose -f docker/docker-compose.yaml logs --tail 100 raw-consumer
 ```
 
@@ -185,16 +184,17 @@ indicates process liveness only, not successful delivery or market freshness.
   in a deployed workspace.
 
 The unit suite uses real SQLite/gzip with mocked Kafka/S3, covering interrupted
-uploads, commit failure, restart/rebalance replay, size limits, and unchanged
-legacy behavior. The Python 3.11 image is built and smoke-tested without network
-access using SDK stubs. Live Kafka-to-S3 delivery and IAM are not yet verified.
+uploads, commit failure, restart/rebalance replay, and size limits. The Python
+3.11 image is built and smoke-tested without network access using SDK stubs.
+Live Kafka-to-S3 delivery has been verified repeatedly against the real
+workspace/bucket - see the handover ledger's change log.
 
 ## Gold Snapshot Contract v1
 
-Start with complete snapshots of selected small datasets. The first Databricks
+Start with complete snapshots of selected small datasets. The Databricks ticks
 slice produces `daily_quote_summary` with key `(provider, symbol, capture_date_utc)`;
-the legacy `daily_summaries` indicator product is not migrated yet. Finalize the
-first export's dataset schema before implementing publication. Pin Delta source versions before
+`daily_summaries`/`sector_performance`/`correlations` (via `databricks_indicators.py`)
+and `fundamentals`/`historical_ohlcv` are migrated too - see "R6" below. Pin Delta source versions before
 export, establish an upstream batch boundary, and read using Delta APIs. No
 loader may scan the physical files beneath a Delta table as ordinary Parquet.
 
@@ -248,7 +248,7 @@ Many Requests` in one live run), and - independently of that failure - running
 the actual data-fetching business logic on a GitHub Actions runner conflicts
 with this project's ownership boundary: **GitHub Actions owns infra deploy/
 update/teardown here, never job execution.** Business logic runs on Databricks
-(or locally, for the legacy Kafka/Airflow components); GitHub Actions only
+(or locally, for the Kafka/Airflow components); GitHub Actions only
 triggers `databricks bundle run` and never itself executes the fetch.
 
 Each symbol's yfinance response is validated against `FundamentalData`
@@ -311,8 +311,8 @@ table, read at a pinned version. Every run fully recomputes all three
 outputs from that version - the legacy job's "daily incremental MERGE" mode
 is deliberately dropped in favor of the same "always rebuild" simplification
 used throughout this migration, appropriate at this project's data scale.
-Publishes three gold tables with the MERGE keys already documented in
-[README.md](../README.md#merge-keys): `daily_summaries` (`symbol, date`),
+Publishes three gold tables with the business keys already documented in
+[README.md](../README.md#business-keys): `daily_summaries` (`symbol, date`),
 `sector_performance` (`sector, date`), `correlations` (`symbol_a, symbol_b,
 date`).
 
@@ -323,6 +323,17 @@ entry and SQL DDL per dataset, confirming the "build generic across
 datasets" decision made in R2/R4 scales as intended.
 
 ## Access and IaC Ownership
+
+> **This section (through "Validation and Operations") was written before
+> the platform was actually deployed** and describes a "prepared, not
+> applied" state that is now stale - stacks 05/06/07, the Databricks
+> Terraform roots, and the Snowflake Terraform roots have all since been
+> deployed and live-verified (see the
+> [handover ledger](implementation-handover.md)'s change log for the real
+> deployment/verification history and `databricks/README.md`/
+> `snowflake/README.md` for current operational runbooks). The IAM/ownership
+> *design* described below is still accurate; only its "not yet applied"
+> framing is outdated.
 
 The optional [hybrid access template](../cloudformation/05-hybrid-access.yaml)
 creates three **unattached** managed policies, importing the existing bucket ARN:
@@ -428,8 +439,7 @@ outlive resource deletion.
 
 ## Next Slice
 
-Verify Databricks account/runtime/storage capabilities, supply the prepared IaC
-with actual account identities, and authorize deployment of the implemented quote
-slice. Reconcile its outputs and failure/retry behavior in the workspace before
-implementing immutable gold exports and the Snowflake snapshot loader. The
-current silver path remains the default; do not migrate every job or add CDC at once.
+The migration this document was tracking is complete - see the
+[handover ledger](implementation-handover.md) for the current roadmap (if
+any) and the next concrete task, rather than this file, which now only
+documents settled architecture/contracts.
