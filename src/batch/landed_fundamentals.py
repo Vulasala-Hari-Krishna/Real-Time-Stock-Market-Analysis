@@ -148,7 +148,14 @@ def fetch_all(
             sleep(SYMBOL_DELAY_SECONDS)
         record = fetch_one(symbol, sleep=sleep)
         if record is not None:
-            row = record.model_dump(mode="json")
+            # Plain (not mode="json") dump: these rows feed spark.createDataFrame
+            # against BRONZE_SCHEMA's native `timestamp` type for retrieved_at,
+            # which requires a real datetime.datetime - mode="json" stringifies
+            # it to ISO text instead, which Spark Connect's Arrow conversion
+            # rejects (confirmed live 2026-09-27: the first run where every
+            # symbol actually succeeded reached this line for the first time
+            # and failed with `AssertionError` in convert_timestamp).
+            row = record.model_dump()
             row["extraction_id"] = extraction_id
             rows.append(row)
         logger.info(
