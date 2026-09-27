@@ -4,6 +4,10 @@
 ![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+![Architecture Diagram](docs/architecture.drawio.svg)
+
+> **[Open in draw.io →](docs/architecture.drawio)** for the editable version.
+
 **In one sentence:** this project watches live stock prices for 10 major
 companies, continuously records and cleans that data in the cloud, works
 out useful patterns and trends from it, and shows the results on a web
