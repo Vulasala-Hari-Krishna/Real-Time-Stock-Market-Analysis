@@ -112,7 +112,7 @@ resources:
             # already-landed S3 files.
             dependencies:
               - ./dist/*.whl
-              - yfinance==0.2.36
+              - yfinance==0.2.66
 
     landed_historical:
       name: stock-market-hybrid-${bundle.target}-landed-historical
@@ -145,7 +145,7 @@ resources:
             environment_version: "4"
             dependencies:
               - ./dist/*.whl
-              - yfinance==0.2.36
+              - yfinance==0.2.66
 
     landed_indicators:
       name: stock-market-hybrid-${bundle.target}-landed-indicators

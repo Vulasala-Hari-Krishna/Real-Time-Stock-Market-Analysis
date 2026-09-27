@@ -335,10 +335,12 @@ bootstrap command) - no manual connection setup needed once those two
 variables are set locally. All three DAGs ship **paused**
 (`AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true`, same as every existing
 DAG here) - unpausing one is a separate, deliberate action, not a side effect
-of deploying this code. `databricks_historical_and_indicators_pipeline` and
-`databricks_fundamentals_pipeline` will hit the still-unresolved yfinance 429
-issue (see the handover ledger) if actually triggered; `databricks_ticks_pipeline`
-is not affected by that blocker.
+of deploying this code. The yfinance 429 issue `databricks_fundamentals_pipeline`
+(and, less certainly, `databricks_historical_and_indicators_pipeline`) would
+have hit is root-caused and fixed as of 2026-09-27 (see the handover ledger) -
+`yfinance==0.2.36` was Edge/CDN-blocked by Yahoo regardless of network, fixed
+by upgrading to `0.2.66`; the bundle needs redeploying to pick that up before
+an actual trigger. `databricks_ticks_pipeline` was never affected by it.
 
 ## Pause and Destroy
 

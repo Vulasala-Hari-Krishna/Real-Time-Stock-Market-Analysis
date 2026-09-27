@@ -1,4 +1,9 @@
-yfinance==0.2.36
+# yfinance 0.2.66 (up from 0.2.36): see requirements.txt's comment for the
+# root cause and evidence. Its curl_cffi dependency needs cffi>=2.0, which
+# conflicts with snowflake-connector-python's declared cffi<2.0 pin below -
+# an accepted, tested pip metadata conflict (imports and the full test suite
+# both verified clean with the resulting cffi>=2.0), same as in requirements.txt.
+yfinance==0.2.66
 boto3==1.34.62
 pyspark==3.5.3
 pydantic==2.6.4
