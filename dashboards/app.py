@@ -30,22 +30,33 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Live Data reads from the S3 silver layer (speed layer).")
-st.sidebar.caption("Other pages read from the S3 gold layer (batch layer).")
-st.sidebar.caption("Snowflake History reads from the hybrid Databricks→Snowflake pipeline.")
+st.sidebar.caption(
+    "Live Data reads straight from S3 landing/ticks/ (Kafka's raw capture)."
+)
+st.sidebar.caption(
+    "Overview, Stock Detail, and Sector Analysis read from Snowflake (hybrid Databricks→Snowflake pipeline)."
+)
+st.sidebar.caption(
+    "Snowflake History reads sampled-quote summaries from the same pipeline."
+)
 
 if page == "Live Data":
     from dashboards.pages.live_data import render
+
     render()
 elif page == "Market Overview":
     from dashboards.pages.overview import render
+
     render()
 elif page == "Stock Detail":
     from dashboards.pages.stock_detail import render
+
     render()
 elif page == "Sector Analysis":
     from dashboards.pages.sector_analysis import render
+
     render()
 elif page == "Snowflake History":
     from dashboards.pages.snowflake_history import render
+
     render()

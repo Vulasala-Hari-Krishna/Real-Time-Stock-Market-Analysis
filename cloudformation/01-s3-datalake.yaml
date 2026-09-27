@@ -1,9 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  S3 data lake buckets for the stock market analytics pipeline.
-  Preserves legacy bronze/silver/gold paths and defines separate hybrid
-  landing, lakehouse, checkpoint, and publishing paths. Includes an
-  Athena query results bucket for the existing local workflow.
+  S3 data lake bucket for the stock market analytics pipeline. Defines the
+  hybrid landing, lakehouse, checkpoint, and publishing paths that the
+  Kafka producer/consumer, Databricks jobs, and Snowflake loader use.
 
 Parameters:
   Environment:
@@ -41,10 +40,6 @@ Resources:
         RestrictPublicBuckets: true
       LifecycleConfiguration:
         Rules:
-          - Id: BronzeExpiration
-            Prefix: bronze/
-            Status: Enabled
-            ExpirationInDays: 30
           - Id: AbortIncompleteLandingUploads
             Prefix: landing/
             Status: Enabled
@@ -55,6 +50,18 @@ Resources:
             Status: Enabled
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 7
+          - Id: PublishBatchExpiration
+            Prefix: publish/
+            Status: Enabled
+            # Every gold_snapshot.py export run (ticks every 15 min, daily/
+            # weekly jobs) writes a new immutable batch here and never
+            # deletes an old one - Snowflake's COPY INTO only ever reads the
+            # single batch named in its own manifest, never the whole
+            # prefix, so nothing downstream depends on a batch surviving
+            # past the run that consumed it. 30 days (matching legacy
+            # bronze/'s own retention below) leaves ample room to retry a
+            # failed Snowflake load from the original export before it goes.
+            ExpirationInDays: 30
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -78,32 +85,6 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: 'false'
-
-  AthenaResultsBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: !If [IsProd, Retain, Delete]
-    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
-    Properties:
-      BucketName: !Sub '${ProjectName}-athena-results-${Environment}-${AWS::AccountId}'
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      LifecycleConfiguration:
-        Rules:
-          - Id: ExpireQueryResults
-            Status: Enabled
-            ExpirationInDays: 7
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
 
 Outputs:
   DataLakeBucketName:
@@ -136,13 +117,3 @@ Outputs:
     Value: !Sub 's3://${DataLakeBucket}/publish/'
     Export:
       Name: !Sub '${ProjectName}-${Environment}-HybridPublishUri'
-  AthenaResultsBucketName:
-    Description: Name of the Athena query results bucket
-    Value: !Ref AthenaResultsBucket
-    Export:
-      Name: !Sub '${ProjectName}-${Environment}-AthenaResultsBucketName'
-  AthenaResultsBucketArn:
-    Description: ARN of the Athena query results bucket
-    Value: !GetAtt AthenaResultsBucket.Arn
-    Export:
-      Name: !Sub '${ProjectName}-${Environment}-AthenaResultsBucketArn'

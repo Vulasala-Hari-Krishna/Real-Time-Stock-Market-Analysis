@@ -19,11 +19,13 @@ if [[ "${CONFIRM}" != "yes" ]]; then
     exit 0
 fi
 
-# Stacks in reverse dependency order
+# Stacks in reverse dependency order. The legacy Athena/Glue stacks
+# (02-glue-catalog, 04-athena-workgroup) were retired from this repo along
+# with the rest of the legacy pipeline; if they were ever deployed live in
+# your account, tear them down separately/manually first (this script no
+# longer knows their template files, so it can't recreate/update them).
 STACKS=(
-    "04-athena-workgroup"
     "03-iam-roles"
-    "02-glue-catalog"
     "01-s3-datalake"
 )
 
@@ -86,7 +88,6 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 echo ""
 echo ">>> Emptying S3 buckets..."
 empty_bucket "${PROJECT}-datalake-${ENVIRONMENT}-${ACCOUNT_ID}"
-empty_bucket "${PROJECT}-athena-results-${ENVIRONMENT}-${ACCOUNT_ID}"
 
 delete_stack() {
     local template_name="$1"

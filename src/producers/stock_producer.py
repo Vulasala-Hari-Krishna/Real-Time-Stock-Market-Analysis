@@ -1,8 +1,7 @@
 """Kafka producer that ingests stock quotes from Alpha Vantage.
 
 Polls the GLOBAL_QUOTE endpoint for each stock in the watchlist,
-validates data via Pydantic, publishes to Kafka, and backs up raw
-JSON to S3 bronze layer.
+validates data via Pydantic, and publishes to Kafka.
 """
 
 import json
@@ -14,7 +13,6 @@ import requests
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
-from src.common.s3_utils import generate_s3_key, upload_json_to_s3
 from src.common.schemas import StockTick
 from src.config.settings import Settings, get_settings
 from src.config.watchlist import SYMBOLS
@@ -151,38 +149,11 @@ def publish_tick(producer: KafkaProducer, tick: StockTick) -> bool:
         return False
 
 
-def backup_to_s3(data: dict, symbol: str, settings: Settings) -> None:
-    """Write raw API response to S3 bronze layer as backup.
-
-    Args:
-        data: Raw API response dict.
-        symbol: Ticker symbol.
-        settings: Application settings.
-    """
-    try:
-        key = generate_s3_key("bronze", "stock_ticks", symbol=symbol)
-        upload_json_to_s3(
-            data=data,
-            bucket=settings.s3_bucket_name,
-            key=key,
-            region=settings.aws_default_region,
-        )
-        logger.debug(
-            "Backed up raw data for %s to s3://%s/%s",
-            symbol,
-            settings.s3_bucket_name,
-            key,
-        )
-    except Exception as exc:
-        logger.warning("S3 backup failed for %s (non-fatal): %s", symbol, exc)
-
-
 def run_producer(settings: Settings | None = None) -> int:
     """Run the main producer loop.
 
-    Polls Alpha Vantage for each stock in the watchlist, publishes
-    ticks to Kafka, and backs up raw data to S3. Respects kill switch
-    and iteration limits.
+    Polls Alpha Vantage for each stock in the watchlist and publishes
+    ticks to Kafka. Respects kill switch and iteration limits.
 
     Args:
         settings: Optional Settings override (useful for testing).
@@ -232,8 +203,6 @@ def run_producer(settings: Settings | None = None) -> int:
 
                 if publish_tick(producer, tick):
                     total_published += 1
-
-                backup_to_s3(data, symbol, settings)
 
                 # Rate limit: Alpha Vantage free tier = 5 calls/min
                 time.sleep(RATE_LIMIT_SLEEP_SECONDS)

@@ -4,8 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Start here
 
-This repo is mid-migration from a fully local pipeline to a hybrid Databricks/Snowflake
-architecture, on branch `feature/databricks_snowflake_impl`. Before making changes:
+This repo's migration from a fully local Kafka/Spark/Airflow pipeline to a
+hybrid Databricks/Snowflake architecture is **complete and the legacy local
+pipeline has been retired** (2026-09-28, branch `feature/databricks_snowflake_impl`).
+Before making changes:
 
 1. Read [docs/implementation-handover.md](docs/implementation-handover.md) — the
    model-independent progress ledger (status per workstream, what's actually
@@ -23,15 +25,20 @@ architecture, on branch `feature/databricks_snowflake_impl`. Before making chang
 
 Key facts from the ledger you should not re-derive from scratch:
 - Do not switch branches or commit unless the user asks.
-- The "legacy" architecture (README body below the migration-status banner) is
-  the currently working local system — Kafka/Spark local pipeline writing to S3,
-  local Airflow, Streamlit reading S3. Keep it operational; migration steps
-  replace pieces of it incrementally, not all at once.
-- `databricks/` contains an implemented-but-not-deployed vertical slice
-  (Auto Loader bronze -> silver validation/quarantine/dedup -> gold daily
-  sampled-quote summary) plus staged Terraform for platform IaC. Nothing has
-  been deployed to a real Databricks workspace; Snowflake integration does not
-  exist yet.
+- **The architecture is now Kafka (local) → Databricks → Snowflake → Airflow
+  (local) → Streamlit — nothing else.** The local Spark cluster, its batch
+  jobs (`tick_rollup.py`, `daily_aggregation.py`'s standalone execution,
+  `fundamental_enrichment.py`, `delta_maintenance.py`), the legacy Airflow
+  DAGs that `spark-submit`ted them, and the AWS Glue/Athena querying stack
+  have all been removed. A handful of legacy-named modules survive as
+  **library code** genuinely reused by Databricks jobs (see below) — do not
+  assume every legacy-named file is gone, and do not assume every
+  legacy-named file is still a runnable script.
+- Every Databricks job, Airflow DAG, and Snowflake dataset has been deployed
+  and live-verified with real data at least once. `maintain_delta_tables`
+  ships with a paused native schedule; every other Databricks job is
+  triggered by an Airflow DAG. See the handover ledger's change log for the
+  full verification history.
 - Never provision paid/recurring cloud resources, start cloud jobs, or run
   destructive cleanup without explicit user authorization. Full teardown is a
   requirement of this project but must be explicitly confirmed each time, not
@@ -43,9 +50,9 @@ Key facts from the ledger you should not re-derive from scratch:
 # Setup
 make setup              # pip install -r requirements.txt -r requirements-dev.txt
 
-# Local stack (Docker Compose)
-make start               # start all services (Kafka, Spark, Airflow, Streamlit)
-make stop                # stop all services
+# Local stack (Docker Compose) - Kafka, raw-landing consumer, Airflow, Streamlit
+make start               # start all local services
+make stop                # stop all local services
 make demo                # MAX_ITERATIONS=5 docker compose up (quick demo)
 make logs                # tail logs from all services
 
@@ -53,21 +60,25 @@ make logs                # tail logs from all services
 make test                                                              # pytest tests/unit, coverage >=80% gate
 pytest tests/unit -v --cov=src --cov-report=term-missing --cov-fail-under=80
 pytest tests/unit/test_some_module.py::test_case -v                    # single test
-pytest tests/integration -v                                            # requires Docker services running
+pytest tests/integration -v -m integration                            # opt-in, gated
 
 # Lint / format / typecheck
-make lint                # ruff check src/ tests/ ; mypy src/ --ignore-missing-imports
-make format              # black src/ tests/ ; ruff check --fix src/ tests/
+make lint                # ruff check src/ tests/ dags/ dashboards/ ; mypy src/ dags/ --ignore-missing-imports
+make format              # black + ruff --fix, same scope
 
-# AWS CloudFormation
+# AWS CloudFormation (S3 data lake + IAM, stacks 01/03)
 make validate-cfn        # cfn-lint cloudformation/*.yaml
-make deploy              # deploy all CFN stacks — do not run without authorization
-make teardown            # destroy all CFN stacks — do not run without authorization
+make deploy              # deploy stacks 01/03 — do not run without authorization
+make teardown            # destroy stacks 01/03 — do not run without authorization
+make deploy-hybrid       # deploy hybrid-access stacks 05/06 — do not run without authorization
+make teardown-hybrid     # destroy stacks 05/06 (run before make teardown) — do not run without authorization
 
-# Databricks (staged, not yet CLI-validated in this environment)
+# Databricks bundle
 python -m pip wheel --no-deps --wheel-dir databricks/dist ./databricks
+databricks bundle validate -t dev
+databricks bundle deploy -t dev     # do not run without authorization
 
-# Terraform (per root: databricks/terraform/credential, databricks/terraform/workspace)
+# Terraform (databricks/terraform/{credential,workspace}, snowflake/terraform/{bootstrap,workspace})
 terraform init -backend=false -input=false -lockfile=readonly
 terraform fmt -check
 terraform validate
@@ -79,47 +90,56 @@ full gate. Docs-only changes need link/frontmatter checks, not a full test run.
 
 ## Architecture
 
-### Local baseline (Lambda architecture, currently working)
-
 ```
-Alpha Vantage -> Kafka producer -> Kafka -> Spark Structured Streaming -> S3 silver/stock_ticks (Parquet)
-                        |-> raw backup -> S3 bronze/
-Airflow DAGs -> spark-submit -> Spark cluster:
-    tick_rollup (ticks -> daily OHLCV) -> S3 silver/historical
-    daily_aggregation (indicators/signals/sectors/correlations) -> S3 gold/ (Delta Lake, MERGE)
-    fundamental_enrichment (P/E, market cap via yfinance) -> S3 gold/ (Delta MERGE)
-    delta_maintenance (OPTIMIZE + VACUUM, monthly)
-Streamlit (deltalake reader, no Spark) <- S3 silver (live) + gold (historical)
+Alpha Vantage -> Kafka producer -> Kafka broker
+                                       |
+                                       v
+                          raw_landing.py (plain Python, continuous,
+                          gzip NDJSON envelopes, SQLite spool)
+                                       |
+                                       v
+                          S3 landing/ticks/  <-- read directly by the
+                                       |         dashboard's Live Data page
+                                       v
+              Databricks Auto Loader (AvailableNow, triggered by Airflow every 15 min)
+                                       |
+                      bronze -> silver -> gold  (Delta Lake, Unity Catalog)
+                       landed_ticks -> daily_quote_summary
+                       landed_ticks_rollup (daily) + landed_historical (manual) -> historical_ohlcv
+                       landed_indicators (daily) -> daily_summaries/sector_performance/correlations
+                       landed_fundamentals (weekly) -> fundamentals
+                                       |
+                                       v
+              Immutable S3 snapshot export + manifest (src/export/gold_snapshot.py)
+                                       |
+                                       v
+       Snowflake: COPY INTO staging -> atomic DELETE+INSERT swap into SERVING.*
+       (src/load/snowflake_snapshot.py)
+                                       |
+                                       v
+           Streamlit (dashboards/snowflake_loader.py + landing_reader.py)
+                       <- SERVING.* (Snowflake) + S3 landing/ticks/ (live)
+
+Local Airflow (dags/databricks_*.py) triggers every Databricks job above via
+the Jobs API, then runs the export/load step - it does no computation itself.
 ```
 
-- `src/producers/stock_producer.py` — polls Alpha Vantage every 60s, publishes to Kafka, backs up raw to S3 bronze. Respects `RUN_PIPELINE` / `MAX_ITERATIONS` kill switches — preserve these.
-- `src/consumers/spark_streaming.py` — Spark Structured Streaming consumer, 30s micro-batches, validation/dedup/anomaly detection, writes silver Parquet.
-- `src/batch/` — PySpark batch jobs run via Airflow `spark-submit` (`tick_rollup.py`, `daily_aggregation.py`, `fundamental_enrichment.py`, `delta_maintenance.py`, `historical_backfill.py`). Each has a daily/incremental mode (partition-pruned, MERGE into gold) and a full mode (one-time seed, overwrite).
-- `src/common/` — shared indicator functions, S3 helpers, Pydantic schemas — reused by both local batch jobs and Databricks transforms.
+- `src/producers/stock_producer.py` — polls Alpha Vantage every 60s, publishes to Kafka. Respects `RUN_PIPELINE` / `MAX_ITERATIONS` kill switches — preserve these. No longer backs up to S3 itself (that was a legacy-only, unread side effect; removed).
+- `src/consumers/raw_landing.py` — the sole bridge from Kafka into the hybrid pipeline (writes `landing/ticks/`), continuous, no Docker Compose profile gate. At-least-once delivery — downstream (Databricks) dedupes on `(source_id, topic, partition, offset)`.
+- `src/batch/databricks_*.py` / `landed_*.py` — Databricks job runners and pure Spark transforms, deployed via the Asset Bundle in `databricks/`.
+- `src/batch/daily_aggregation.py` and `src/batch/historical_backfill.py` — **legacy-named but not legacy**: kept as library code because `databricks_indicators.py` imports the former's transform functions directly, and `landed_historical.py` imports the latter's `download_history` directly. Their own legacy standalone-script/CLI entry points are unreachable now (the Spark cluster and Airflow DAGs that ran them are gone) — treat them as importable modules, not runnable jobs.
+- `src/common/schemas.py`, `src/common/s3_utils.py` — shared Pydantic models and S3 helpers, reused by both the kept producer/consumer and Databricks/Snowflake code.
 - `src/config/settings.py` — single source of Pydantic env-var config, including `AWS_DEFAULT_REGION`; don't hardcode region/bucket elsewhere.
-- `dags/spark_submit_config.py` — shared builder for the `spark-submit` command every DAG uses; keeps Airflow scheduler lightweight (BashOperator only, no heavy compute in the scheduler).
-- Gold layer is Delta Lake; MERGE keys are documented in [README.md](README.md#merge-keys) per table (`daily_summaries`: symbol+date, `sector_performance`: sector+date, `correlations`: symbol_a+symbol_b+date, `fundamentals`: symbol, `enriched_prices`: symbol+date).
-- Dashboard (`dashboards/`) reads gold Delta tables with the lightweight `deltalake` package (no Spark), falling back to Parquet then generated demo data if S3 is unreachable — never present demo data as real without saying so.
-
-### Hybrid target (in progress — see handover ledger for real status)
-
-```
-Local producer -> local Kafka -> local raw consumer -> S3 landing/
-S3 landing -> triggered Databricks Auto Loader -> bronze -> silver -> gold Delta (Unity Catalog)
-Delta gold -> immutable S3 snapshot exports + completed manifest -> Snowflake -> SQL marts
-Local Airflow -> Databricks job API -> publication validation -> Snowflake SQL
-Local Streamlit -> local live cache / Snowflake historical analytics
-```
-
-- `databricks/` — wheel-task bundle (`databricks.yml`, `pyproject.toml`) plus `src/batch/databricks_ticks.py` / `landed_ticks.py` (runner + transforms) implementing the current Databricks slice: Auto Loader (`AvailableNow`) reads landed envelopes -> raw bronze Delta -> validate/quarantine/dedup -> silver `quote_samples` -> gold `daily_quote_summary`. This is sampled quotes, not exchange OHLCV — do not conflate with the legacy `daily_summaries` product.
-- `databricks/terraform/` — two independent Terraform roots (`credential/`, `workspace/`) for platform IaC (fail-closed IAM role activated via generated external ID, then workspace/Unity Catalog objects). Ownership split: CloudFormation owns AWS; Terraform owns Databricks (and later Snowflake) platform objects; bundles own Databricks job code; versioned SQL will own Snowflake models. Give every object one owner — don't let CloudFormation and Terraform manage the same resource.
-- `src/consumers/raw_landing.py` — opt-in raw consumer (disabled by default; enabled via `hybrid-raw` Compose profile) that preserves original Kafka bytes/offsets to S3 `landing/` with a durable SQLite spool, committing only after successful upload. At-least-once delivery — downstream (Databricks) must dedupe on `(source_id, topic, partition, offset)`.
-- Snowflake integration, gold snapshot export/manifest, hybrid Airflow coordination, and local live-data cache are **not implemented yet** — see the roadmap table (R1–R11) in the handover ledger before assuming any of this exists.
+- `dags/databricks_pipeline_common.py` — shared trigger/export/load helper every Airflow DAG uses; keeps the scheduler lightweight (it calls the Databricks Jobs API and `src/export/`+`src/load/`, never runs Spark itself).
+- Gold/serving tables are deduplicated on business keys documented in [README.md](README.md#business-keys) per table.
+- `dashboards/snowflake_loader.py` — generic, dataset-registry-driven Snowflake loader (`daily_quote_summary`, `daily_summaries`, `sector_performance`, `correlations`, `fundamentals`), each with a local-cache fallback (`dashboards/local_cache.py`) and a synthetic demo fallback — never present demo/cached data as real without an explicit `LoadStatus` banner (`dashboards/load_status.py`).
+- `dashboards/landing_reader.py` — the Live Data page's source: decodes S3 `landing/ticks/` envelopes directly, no Databricks/Snowflake round trip.
 
 ### Cross-cutting rules worth remembering
 
-- Business/upsert keys reuse `(symbol, date)`-style composites; indicator warm-up windows and historical corrections require recomputing affected ranges, not just merging the latest date.
+- Business keys reuse `(symbol, date)`-style composites (see [README.md#business-keys](README.md#business-keys)); indicator warm-up windows and historical corrections require recomputing affected ranges, not just the latest date.
 - Bronze/raw data must retain source identity (Kafka topic/partition/offset, ingestion vs. event time) for audit/replay; never drop it before canonical validation.
 - Delta tables are read through Delta APIs/transaction log, never as raw Parquet directories.
 - No credentials/bucket names/workspace URLs in code, logs, SQL, or manifests — configuration flows through `src/config/settings.py`, job parameters, or Airflow Connections, never hardcoded.
 - Coverage gate is `--cov-fail-under=80`; unit tests must stay hermetic and cloud-free (mock Kafka/S3/Databricks/Snowflake clients); real integration tests live under `tests/integration/` and are opt-in/gated.
+- GitHub Actions only ever deploys/updates/tears down infrastructure — it never triggers a business-data job run. The one documented exception is `maintain_delta_tables --drop-tables` during teardown, since that job is infrastructure housekeeping, not business logic.

@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   IAM resources for the stock market analytics pipeline.
-  Creates a pipeline IAM user with least-privilege access to S3 data lake,
-  Athena query execution, and Glue catalog read. Stores credentials in
-  Secrets Manager.
+  Creates a pipeline IAM user with least-privilege access to the S3 data
+  lake (used by the local Kafka producer/consumer path). Stores
+  credentials in Secrets Manager.
 
 Parameters:
   Environment:
@@ -38,7 +38,7 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: !Sub '${ProjectName}-pipeline-policy-${Environment}'
-      Description: Least-privilege policy for pipeline S3, Athena, and Glue access
+      Description: Least-privilege policy for pipeline S3 access
       Users:
         - !Ref PipelineUser
       PolicyDocument:
@@ -59,44 +59,6 @@ Resources:
                 - '${BucketArn}/*'
                 - BucketArn: !ImportValue
                     Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucketArn'
-          - Sid: S3AthenaResultsReadWrite
-            Effect: Allow
-            Action:
-              - s3:GetObject
-              - s3:PutObject
-              - s3:ListBucket
-              - s3:GetBucketLocation
-            Resource:
-              - !ImportValue
-                  Fn::Sub: '${ProjectName}-${Environment}-AthenaResultsBucketArn'
-              - !Sub
-                - '${BucketArn}/*'
-                - BucketArn: !ImportValue
-                    Fn::Sub: '${ProjectName}-${Environment}-AthenaResultsBucketArn'
-          - Sid: AthenaQueryExecution
-            Effect: Allow
-            Action:
-              - athena:StartQueryExecution
-              - athena:StopQueryExecution
-              - athena:GetQueryExecution
-              - athena:GetQueryResults
-              - athena:GetWorkGroup
-            Resource:
-              - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${ProjectName}-${Environment}'
-          - Sid: GlueCatalogRead
-            Effect: Allow
-            Action:
-              - glue:GetDatabase
-              - glue:GetDatabases
-              - glue:GetTable
-              - glue:GetTables
-              - glue:GetPartition
-              - glue:GetPartitions
-              - glue:BatchGetPartition
-            Resource:
-              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
-              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${ProjectName}_${Environment}'
-              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${ProjectName}_${Environment}/*'
 
   # ------------------------------------------------------------------
   # Secrets Manager (optional — uncomment to store credentials in AWS

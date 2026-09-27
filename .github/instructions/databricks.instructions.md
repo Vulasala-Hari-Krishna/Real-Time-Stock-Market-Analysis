@@ -1,5 +1,5 @@
 ---
-applyTo: "databricks/**,notebooks/**/*.py"
+applyTo: "databricks/**"
 description: "Use when implementing Databricks bundles, Lakeflow Jobs, Unity Catalog, Auto Loader, Delta tables, or S3 exports for the hybrid migration."
 ---
 
@@ -7,7 +7,7 @@ description: "Use when implementing Databricks bundles, Lakeflow Jobs, Unity Cat
 
 ## Scope and Compute
 
-- Follow [the repository migration plan](../copilot-instructions.md). `databricks/` is a planned deployment location; existing `notebooks/` are exploratory. Do not claim either is deployed without evidence.
+- Follow [the repository migration plan](../copilot-instructions.md). `databricks/` is the deployed bundle location - the migration's legacy-era exploratory `notebooks/` were retired once the local pipeline they inspected was removed.
 - Databricks owns cloud lakehouse transformations, not the local Kafka connection or external market API polling. Read S3 landing inputs; no Docker hostnames or inbound laptop access.
 - Start with one on-demand vertical slice and supported terminating job compute. Use Auto Loader with `AvailableNow` for file ingestion, durable checkpoints, and persisted schema state.
 - Skip runs with no new input. Set finite timeouts, bounded retries, and concurrency limits. Keep schedules and file-arrival triggers disabled until requested; no compute startup per quote or file.

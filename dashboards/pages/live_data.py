@@ -5,12 +5,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from dashboards.data_loader import (
-    NAME_MAP,
-    SECTOR_MAP,
-    SYMBOLS,
-    load_live_ticks,
-)
+from dashboards.data_loader import NAME_MAP, SECTOR_MAP, SYMBOLS
+from dashboards.landing_reader import load_live_ticks
+from dashboards.load_status import render_status_banner
 
 
 def _compute_price_board(df: pd.DataFrame) -> pd.DataFrame:
@@ -35,17 +32,19 @@ def _compute_price_board(df: pd.DataFrame) -> pd.DataFrame:
         change = latest["price"] - first_price
         change_pct = (change / first_price) * 100 if first_price else 0
         total_vol = sym_df["volume"].sum()
-        rows.append({
-            "Symbol": symbol,
-            "Company": NAME_MAP.get(symbol, symbol),
-            "Sector": SECTOR_MAP.get(symbol, ""),
-            "Latest Price": round(latest["price"], 2),
-            "Change": round(change, 2),
-            "Change %": round(change_pct, 2),
-            "Volume": total_vol,
-            "Last Updated": latest["timestamp"],
-            "Ticks": len(sym_df),
-        })
+        rows.append(
+            {
+                "Symbol": symbol,
+                "Company": NAME_MAP.get(symbol, symbol),
+                "Sector": SECTOR_MAP.get(symbol, ""),
+                "Latest Price": round(latest["price"], 2),
+                "Change": round(change, 2),
+                "Change %": round(change_pct, 2),
+                "Volume": total_vol,
+                "Last Updated": latest["timestamp"],
+                "Ticks": len(sym_df),
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -69,12 +68,14 @@ def render() -> None:
     """Render the Live Data page."""
     st.header("Live Market Data")
     st.caption(
-        "Real-time tick data from Kafka → Spark Streaming → S3 silver layer. "
-        "Falls back to demo data when S3 is unavailable."
+        "Real-time tick data straight from Kafka → local raw consumer → S3 "
+        "landing/ticks/ (no Databricks round trip) - typically no more than "
+        "~60s old."
     )
 
     with st.spinner("Loading live ticks…"):
-        ticks = load_live_ticks()
+        ticks, status = load_live_ticks()
+    render_status_banner(status)
 
     if ticks.empty:
         st.warning("No live tick data available.")
@@ -94,19 +95,21 @@ def render() -> None:
     col1.metric("Symbols Streaming", len(board))
     col2.metric("Gainers", int(gainers))
     col3.metric("Losers", int(losers))
-    col4.metric("Last Tick", latest_ts.strftime("%H:%M:%S") if pd.notna(latest_ts) else "N/A")
+    col4.metric(
+        "Last Tick", latest_ts.strftime("%H:%M:%S") if pd.notna(latest_ts) else "N/A"
+    )
 
     # --------------- Price board table ---------------
     st.subheader("Real-Time Price Board")
 
-    styled = board.style.map(
-        _highlight_change, subset=["Change", "Change %"]
-    ).format({
-        "Latest Price": "${:.2f}",
-        "Change": "{:+.2f}",
-        "Change %": "{:+.2f}%",
-        "Volume": "{:,.0f}",
-    })
+    styled = board.style.map(_highlight_change, subset=["Change", "Change %"]).format(
+        {
+            "Latest Price": "${:.2f}",
+            "Change": "{:+.2f}",
+            "Change %": "{:+.2f}%",
+            "Volume": "{:,.0f}",
+        }
+    )
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
     # --------------- Intraday price chart ---------------
@@ -137,15 +140,15 @@ def render() -> None:
 
     movers = board.sort_values("Change %", ascending=False)
     fig_movers = go.Figure()
-    fig_movers.add_trace(go.Bar(
-        x=movers["Symbol"],
-        y=movers["Change %"],
-        marker_color=[
-            "green" if v > 0 else "red" for v in movers["Change %"]
-        ],
-        text=[f"{v:+.2f}%" for v in movers["Change %"]],
-        textposition="outside",
-    ))
+    fig_movers.add_trace(
+        go.Bar(
+            x=movers["Symbol"],
+            y=movers["Change %"],
+            marker_color=["green" if v > 0 else "red" for v in movers["Change %"]],
+            text=[f"{v:+.2f}%" for v in movers["Change %"]],
+            textposition="outside",
+        )
+    )
     fig_movers.update_layout(
         title="Price Change % (Today)",
         xaxis_title="Symbol",

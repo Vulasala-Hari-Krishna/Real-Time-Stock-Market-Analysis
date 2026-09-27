@@ -17,7 +17,8 @@ def render() -> None:
         "Daily sampled-quote summaries: Databricks gold -> R4 snapshot "
         "loader -> Snowflake SERVING.DAILY_QUOTE_SUMMARY. Sampled quotes, "
         "not exchange OHLCV - distinct from the Market Overview page's "
-        "legacy daily_summaries product."
+        "daily_summaries product (indicators/signals computed from "
+        "historical_ohlcv, a different Databricks pipeline)."
     )
 
     with st.spinner("Querying Snowflake..."):

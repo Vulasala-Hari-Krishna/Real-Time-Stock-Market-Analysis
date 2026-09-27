@@ -11,7 +11,6 @@ from src.config.settings import Settings
 from src.producers.stock_producer import (
     ALPHA_VANTAGE_BASE_URL,
     KAFKA_TOPIC,
-    backup_to_s3,
     fetch_global_quote,
     parse_global_quote,
     publish_tick,
@@ -264,47 +263,6 @@ class TestPublishTick:
 
 
 # ---------------------------------------------------------------------------
-# backup_to_s3
-# ---------------------------------------------------------------------------
-class TestBackupToS3:
-    """Tests for S3 bronze backup."""
-
-    @patch("src.producers.stock_producer.upload_json_to_s3")
-    @patch("src.producers.stock_producer.generate_s3_key")
-    def test_successful_backup(
-        self,
-        mock_gen_key: MagicMock,
-        mock_upload: MagicMock,
-        valid_api_response: dict,
-        test_settings: Settings,
-    ) -> None:
-        """Successfully backs up data to S3."""
-        mock_gen_key.return_value = "bronze/stock_ticks/year=2024/AAPL.json"
-        mock_upload.return_value = True
-
-        backup_to_s3(valid_api_response, "AAPL", test_settings)
-
-        mock_gen_key.assert_called_once_with("bronze", "stock_ticks", symbol="AAPL")
-        mock_upload.assert_called_once()
-
-    @patch("src.producers.stock_producer.upload_json_to_s3")
-    @patch("src.producers.stock_producer.generate_s3_key")
-    def test_s3_failure_non_fatal(
-        self,
-        mock_gen_key: MagicMock,
-        mock_upload: MagicMock,
-        valid_api_response: dict,
-        test_settings: Settings,
-    ) -> None:
-        """S3 backup failure does not raise an exception."""
-        mock_gen_key.return_value = "bronze/stock_ticks/test.json"
-        mock_upload.side_effect = Exception("S3 error")
-
-        # Should not raise
-        backup_to_s3(valid_api_response, "AAPL", test_settings)
-
-
-# ---------------------------------------------------------------------------
 # run_producer
 # ---------------------------------------------------------------------------
 class TestRunProducer:
@@ -330,7 +288,6 @@ class TestRunProducer:
         result = run_producer(settings)
         assert result == 0
 
-    @patch("src.producers.stock_producer.backup_to_s3")
     @patch("src.producers.stock_producer.time.sleep")
     @patch("src.producers.stock_producer.publish_tick")
     @patch("src.producers.stock_producer.parse_global_quote")
@@ -343,7 +300,6 @@ class TestRunProducer:
         mock_parse: MagicMock,
         mock_publish: MagicMock,
         mock_sleep: MagicMock,
-        mock_backup: MagicMock,
         test_settings: Settings,
     ) -> None:
         """Runs one iteration and publishes ticks for all symbols."""
@@ -369,7 +325,6 @@ class TestRunProducer:
         mock_producer.flush.assert_called_once()
         mock_producer.close.assert_called_once()
 
-    @patch("src.producers.stock_producer.backup_to_s3")
     @patch("src.producers.stock_producer.time.sleep")
     @patch("src.producers.stock_producer.publish_tick")
     @patch("src.producers.stock_producer.parse_global_quote")
@@ -382,7 +337,6 @@ class TestRunProducer:
         mock_parse: MagicMock,
         mock_publish: MagicMock,
         mock_sleep: MagicMock,
-        mock_backup: MagicMock,
         test_settings: Settings,
     ) -> None:
         """Skips symbols when API fetch fails."""
@@ -395,7 +349,6 @@ class TestRunProducer:
         assert result == 0
         mock_publish.assert_not_called()
 
-    @patch("src.producers.stock_producer.backup_to_s3")
     @patch("src.producers.stock_producer.time.sleep")
     @patch("src.producers.stock_producer.publish_tick")
     @patch("src.producers.stock_producer.parse_global_quote")
@@ -408,7 +361,6 @@ class TestRunProducer:
         mock_parse: MagicMock,
         mock_publish: MagicMock,
         mock_sleep: MagicMock,
-        mock_backup: MagicMock,
     ) -> None:
         """Stops after reaching max_iterations."""
         settings = Settings(
@@ -435,7 +387,6 @@ class TestRunProducer:
 
         assert result == 20  # 10 symbols × 2 iterations
 
-    @patch("src.producers.stock_producer.backup_to_s3")
     @patch("src.producers.stock_producer.time.sleep")
     @patch("src.producers.stock_producer.publish_tick")
     @patch("src.producers.stock_producer.parse_global_quote")
@@ -448,7 +399,6 @@ class TestRunProducer:
         mock_parse: MagicMock,
         mock_publish: MagicMock,
         mock_sleep: MagicMock,
-        mock_backup: MagicMock,
         test_settings: Settings,
     ) -> None:
         """Skips symbols when parsing fails."""

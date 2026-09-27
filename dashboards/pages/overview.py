@@ -4,12 +4,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from dashboards.data_loader import (
-    SECTOR_MAP,
-    SYMBOLS,
-    load_daily_summaries,
-    load_sector_performance,
-)
+from dashboards.data_loader import SECTOR_MAP, SYMBOLS
+from dashboards.load_status import render_status_banner
+from dashboards.snowflake_loader import load_daily_summaries, load_sector_performance
 
 
 def _signal_color(signal: str) -> str:
@@ -46,8 +43,15 @@ def _build_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     latest = latest[latest["symbol"].isin(SYMBOLS)]
     latest["sector"] = latest["symbol"].map(SECTOR_MAP)
     cols = [
-        "symbol", "sector", "close", "daily_return_pct",
-        "sma_20", "sma_50", "rsi_14", "volume", "signals",
+        "symbol",
+        "sector",
+        "close",
+        "daily_return_pct",
+        "sma_20",
+        "sma_50",
+        "rsi_14",
+        "volume",
+        "signals",
     ]
     available_cols = [c for c in cols if c in latest.columns]
     return latest[available_cols].sort_values("symbol").reset_index(drop=True)
@@ -58,7 +62,8 @@ def render() -> None:
     st.header("Market Overview")
 
     with st.spinner("Loading daily summaries…"):
-        summaries = load_daily_summaries()
+        summaries, status = load_daily_summaries()
+    render_status_banner(status)
 
     if summaries.empty:
         st.warning("No summary data available.")
@@ -68,9 +73,19 @@ def render() -> None:
 
     # --------------- Metrics row ---------------
     col1, col2, col3, col4 = st.columns(4)
-    avg_return = table["daily_return_pct"].mean() if "daily_return_pct" in table.columns else 0
-    bullish = table["signals"].str.contains("OVERSOLD|GOLDEN_CROSS", na=False).sum() if "signals" in table.columns else 0
-    bearish = table["signals"].str.contains("OVERBOUGHT|DEATH_CROSS", na=False).sum() if "signals" in table.columns else 0
+    avg_return = (
+        table["daily_return_pct"].mean() if "daily_return_pct" in table.columns else 0
+    )
+    bullish = (
+        table["signals"].str.contains("OVERSOLD|GOLDEN_CROSS", na=False).sum()
+        if "signals" in table.columns
+        else 0
+    )
+    bearish = (
+        table["signals"].str.contains("OVERBOUGHT|DEATH_CROSS", na=False).sum()
+        if "signals" in table.columns
+        else 0
+    )
 
     col1.metric("Stocks Tracked", len(table))
     col2.metric("Avg Daily Return", f"{avg_return:.2f}%")
@@ -98,7 +113,8 @@ def render() -> None:
     st.subheader("Sector Performance")
 
     with st.spinner("Loading sector data…"):
-        sector_df = load_sector_performance()
+        sector_df, sector_status = load_sector_performance()
+    render_status_banner(sector_status)
 
     if sector_df.empty:
         st.info("No sector data available.")

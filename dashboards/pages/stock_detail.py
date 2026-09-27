@@ -5,12 +5,9 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from dashboards.data_loader import (
-    NAME_MAP,
-    SYMBOLS,
-    load_daily_summaries,
-    load_fundamentals,
-)
+from dashboards.data_loader import NAME_MAP, SYMBOLS
+from dashboards.load_status import render_status_banner
+from dashboards.snowflake_loader import load_daily_summaries, load_fundamentals
 
 
 def _price_chart(df: pd.DataFrame, symbol: str) -> go.Figure:
@@ -24,7 +21,8 @@ def _price_chart(df: pd.DataFrame, symbol: str) -> go.Figure:
         Plotly Figure.
     """
     fig = make_subplots(
-        rows=3, cols=1,
+        rows=3,
+        cols=1,
         shared_xaxes=True,
         vertical_spacing=0.03,
         row_heights=[0.55, 0.25, 0.20],
@@ -34,10 +32,15 @@ def _price_chart(df: pd.DataFrame, symbol: str) -> go.Figure:
     # Candlestick
     fig.add_trace(
         go.Candlestick(
-            x=df["date"], open=df["open"], high=df["high"],
-            low=df["low"], close=df["close"], name="OHLC",
+            x=df["date"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name="OHLC",
         ),
-        row=1, col=1,
+        row=1,
+        col=1,
     )
 
     # SMA overlays
@@ -46,18 +49,24 @@ def _price_chart(df: pd.DataFrame, symbol: str) -> go.Figure:
         if col_name in df.columns and df[col_name].notna().any():
             fig.add_trace(
                 go.Scatter(
-                    x=df["date"], y=df[col_name],
-                    mode="lines", name=f"SMA {period}",
+                    x=df["date"],
+                    y=df[col_name],
+                    mode="lines",
+                    name=f"SMA {period}",
                     line={"color": colour, "width": 1},
                 ),
-                row=1, col=1,
+                row=1,
+                col=1,
             )
 
     # RSI
     if "rsi_14" in df.columns:
         fig.add_trace(
-            go.Scatter(x=df["date"], y=df["rsi_14"], name="RSI 14", line={"color": "purple"}),
-            row=2, col=1,
+            go.Scatter(
+                x=df["date"], y=df["rsi_14"], name="RSI 14", line={"color": "purple"}
+            ),
+            row=2,
+            col=1,
         )
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
@@ -66,15 +75,15 @@ def _price_chart(df: pd.DataFrame, symbol: str) -> go.Figure:
     colors = []
     if "volume_vs_avg" in df.columns:
         colors = [
-            "red" if v > 2.0 else "steelblue"
-            for v in df["volume_vs_avg"].fillna(1)
+            "red" if v > 2.0 else "steelblue" for v in df["volume_vs_avg"].fillna(1)
         ]
     else:
         colors = ["steelblue"] * len(df)
 
     fig.add_trace(
         go.Bar(x=df["date"], y=df["volume"], name="Volume", marker_color=colors),
-        row=3, col=1,
+        row=3,
+        col=1,
     )
 
     fig.update_layout(
@@ -154,7 +163,8 @@ def render() -> None:
     )
 
     with st.spinner(f"Loading data for {symbol}…"):
-        summaries = load_daily_summaries()
+        summaries, status = load_daily_summaries()
+    render_status_banner(status)
 
     stock_df = summaries[summaries["symbol"] == symbol].sort_values("date")
 
@@ -182,7 +192,8 @@ def render() -> None:
 
     # Fundamentals
     with st.spinner("Loading fundamentals…"):
-        fundamentals = load_fundamentals()
+        fundamentals, fund_status = load_fundamentals()
+    render_status_banner(fund_status)
 
     fund = fundamentals[fundamentals["symbol"] == symbol]
     if not fund.empty:
