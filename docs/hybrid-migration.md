@@ -26,10 +26,13 @@ Local Airflow -> Databricks run -> validate publication -> Snowflake load/reconc
 ```
 
 R7 and R8 are implemented in code (`dashboards/local_cache.py`;
-`dags/databricks_ticks_pipeline.py`, `dags/databricks_historical_and_indicators_pipeline.py`,
-`dags/databricks_fundamentals_pipeline.py`) and verified against a local
-Airflow container rebuild - see the handover ledger for what "verified" means
-here (DAG parsing/connection provisioning, not a live triggered run).
+`dags/databricks_ticks_pipeline.py`, `dags/databricks_historical_pipeline.py`,
+`dags/databricks_indicators_pipeline.py`, `dags/databricks_fundamentals_pipeline.py`)
+and live-verified: `databricks_ticks_pipeline` has actually been triggered
+and succeeded end to end (including its short-circuit-on-no-input gate); the
+other three are deployed and paused, pending a bundle redeploy to pick up
+fixes found only by triggering them for real - see the handover ledger for
+the full story.
 
 The consumer persists source messages; Databricks owns canonical cleaning and
 indicators. Snowflake owns dimensional/reporting SQL, not duplicate indicator

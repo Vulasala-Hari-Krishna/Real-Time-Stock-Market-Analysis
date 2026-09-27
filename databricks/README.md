@@ -315,15 +315,29 @@ flipping it to `UNPAUSED` is a separate, deliberate action, not the default.
 
 GitHub Actions deploys these jobs but must never run or trigger them (see the
 `feedback_github_actions_infra_only` project memory) - per the target
-architecture, **local Airflow** owns triggering. Three DAGs in `dags/` do
-this: `databricks_ticks_pipeline`, `databricks_historical_and_indicators_pipeline`,
-and `databricks_fundamentals_pipeline`. Each triggers its job(s) via
-`DatabricksRunNowOperator` (by `job_name`, with an `idempotency_token` derived
-from the Airflow run ID so a retried task reconnects to an in-flight run
-instead of submitting a duplicate one) and then publishes the resulting
+architecture, **local Airflow** owns triggering. Four DAGs in `dags/` do
+this: `databricks_ticks_pipeline`, `databricks_historical_pipeline`,
+`databricks_indicators_pipeline`, and `databricks_fundamentals_pipeline`
+(originally one combined `databricks_historical_and_indicators_pipeline`
+DAG, split 2026-09-27 - `landed_historical`'s always-full-rebuild design
+needs a much less frequent schedule than `landed_indicators`' daily one; see
+`databricks_historical_pipeline.py`'s docstring). Each triggers its job(s)
+via `DatabricksRunNowOperator` (by `job_name`, with an `idempotency_token`
+derived from the Airflow run ID so a retried task reconnects to an in-flight
+run instead of submitting a duplicate one) and then publishes the resulting
 dataset(s) to Snowflake by calling the existing, already-tested
 `run_export`/`run_load` functions directly - see
 `dags/databricks_pipeline_common.py`.
+
+Neither the trigger nor the publish step retries a *deterministic* failure -
+confirmed live 2026-09-27 that a plain `retries=` setting isn't enough: once
+the Databricks run reaches a genuine terminal `FAILED` state, or
+`run_export`/`run_load` raise their own `ValueError` for a known business-rule
+violation (stale/duplicate batch, schema drift), retrying just replays the
+identical rejection - so both paths re-raise as `AirflowFailException`
+instead, which Airflow never retries. Real retries are reserved for
+genuinely transient submission/polling/network issues, matching
+`databricks.yml`'s own `max_retries: 0` philosophy.
 
 Until manually triggered, `databricks bundle run` from the CLI or the
 workspace UI's "Run now" remain the interim path, as documented above.
@@ -332,15 +346,17 @@ Setup: the `databricks_default` Airflow connection is provisioned
 automatically on container start from `.env`'s `DATABRICKS_HOST`/
 `DATABRICKS_TOKEN` (`docker/docker-compose.yaml`'s `airflow-webserver`
 bootstrap command) - no manual connection setup needed once those two
-variables are set locally. All three DAGs ship **paused**
+variables are set locally. All four DAGs ship **paused**
 (`AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true`, same as every existing
 DAG here) - unpausing one is a separate, deliberate action, not a side effect
 of deploying this code. The yfinance 429 issue `databricks_fundamentals_pipeline`
-(and, less certainly, `databricks_historical_and_indicators_pipeline`) would
-have hit is root-caused and fixed as of 2026-09-27 (see the handover ledger) -
-`yfinance==0.2.36` was Edge/CDN-blocked by Yahoo regardless of network, fixed
-by upgrading to `0.2.66`; the bundle needs redeploying to pick that up before
-an actual trigger. `databricks_ticks_pipeline` was never affected by it.
+(and, less certainly, `databricks_historical_pipeline`) would have hit, and a
+separate `ModuleNotFoundError: pydantic_settings` gap in `historical_env`/
+`indicators_env`/`maintenance_env`, are both root-caused and fixed as of
+2026-09-27 (see the handover ledger) - the bundle needs redeploying to pick
+either up before an actual trigger. `databricks_ticks_pipeline` was never
+affected by either; it's been live-verified end-to-end already (trigger,
+short-circuit-on-no-input gate, and publish all confirmed working).
 
 ## Pause and Destroy
 

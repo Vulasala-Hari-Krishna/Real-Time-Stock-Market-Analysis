@@ -32,6 +32,18 @@ which this Docker Compose stack does not run today. Without it, each trigger
 task blocks a worker slot for the job's full runtime - the same trade-off the
 legacy DAGs already make via ``BashOperator``/``spark-submit``, not a new one
 introduced here.
+
+Neither trigger nor publish retries a *deterministic* failure. Confirmed live
+2026-09-27, twice: once the underlying Databricks run reaches a real terminal
+``FAILED`` state, retrying it (same idempotency_token, same run) just replays
+the identical cached failure - pure wasted time, not a safety net. Same for
+``run_export``/``run_load``'s own ``ValueError``s (stale/duplicate batch,
+schema drift, an unregistered dataset): the condition they describe won't
+change on its own, only with new data or a fix. Both raise
+``AirflowFailException`` instead, which Airflow never retries, regardless of
+the task's own ``retries=`` setting - reserving real retries for genuinely
+transient submission/polling/network issues, matching ``databricks.yml``'s
+own ``max_retries: 0`` philosophy (never silently retry business logic).
 """
 
 from __future__ import annotations
@@ -39,9 +51,12 @@ from __future__ import annotations
 import logging
 import os
 from datetime import timedelta
+from typing import Any
 
 from airflow.decorators import task
+from airflow.exceptions import AirflowException, AirflowFailException
 from airflow.providers.databricks.operators.databricks import DatabricksRunNowOperator
+from airflow.utils.context import Context
 
 from databricks_job_names import job_name
 from src.config.settings import get_settings
@@ -51,6 +66,26 @@ from src.load.snowflake_snapshot import SnowflakeLoadConfig, run_load
 logger = logging.getLogger(__name__)
 
 DATABRICKS_CONN_ID = "databricks_default"
+
+# The exact, stable substring _handle_databricks_operator_execution's
+# provider-internal helper raises with when (and only when) the run reached
+# a real terminal non-success state - distinct from a connection/timeout
+# exception raised while merely trying to submit or poll, which carries no
+# such message and should still retry normally.
+_TERMINAL_JOB_FAILURE_MARKER = "failed with terminal state"
+
+
+class _NoRetryOnTerminalFailureRunNowOperator(DatabricksRunNowOperator):
+    """DatabricksRunNowOperator that never lets Airflow retry a genuine
+    terminal job failure - see module docstring for why."""
+
+    def execute(self, context: Context) -> Any:
+        try:
+            return super().execute(context)
+        except AirflowException as exc:
+            if _TERMINAL_JOB_FAILURE_MARKER in str(exc):
+                raise AirflowFailException(str(exc)) from exc
+            raise
 
 
 def trigger_databricks_job(
@@ -70,11 +105,12 @@ def trigger_databricks_job(
             between polls) - the actual wall-clock cap is Airflow's own
             ``BaseOperator.execution_timeout``, verified directly against the
             provider's real ``__init__`` signature (6.7.0), not assumed.
-        retries: Airflow-level retries for the trigger/poll call itself, safe
-            because of ``idempotency_token`` (see module docstring) - not a
-            retry of the underlying job logic.
+        retries: Airflow-level retries for the trigger/poll call itself -
+            only ever exercised for a genuinely transient submission/polling
+            issue now (see module docstring); a real terminal job failure
+            skips retries entirely via ``AirflowFailException``.
     """
-    return DatabricksRunNowOperator(
+    return _NoRetryOnTerminalFailureRunNowOperator(
         task_id=task_id,
         databricks_conn_id=DATABRICKS_CONN_ID,
         job_name=job_name(job_short_name),
@@ -111,34 +147,44 @@ def export_and_load(dataset: str, producer_run_id: str) -> dict[str, object]:
     """
     settings = get_settings()
 
-    manifest = run_export(
-        GoldExportConfig(
-            catalog=settings.databricks_catalog,
-            schema_prefix=settings.databricks_schema_prefix,
-            bucket=settings.s3_bucket_name,
-            dataset=dataset,
-        ),
-        producer_run_id=producer_run_id,
-    )
+    try:
+        manifest = run_export(
+            GoldExportConfig(
+                catalog=settings.databricks_catalog,
+                schema_prefix=settings.databricks_schema_prefix,
+                bucket=settings.s3_bucket_name,
+                dataset=dataset,
+            ),
+            producer_run_id=producer_run_id,
+        )
 
-    result = run_load(
-        SnowflakeLoadConfig(
-            account=settings.snowflake_account,
-            user=os.environ["SNOWFLAKE_USER"],
-            role=settings.snowflake_loader_role,
-            warehouse=settings.snowflake_warehouse,
-            database=settings.snowflake_database,
-            staging_schema=settings.snowflake_staging_schema,
-            serving_schema=settings.snowflake_serving_schema,
-            stage_name=settings.snowflake_stage_name,
-            bucket=settings.s3_bucket_name,
-            dataset=dataset,
-        ),
-        private_key_pem=os.environ["SNOWFLAKE_PRIVATE_KEY"],
-        batch_id=manifest.batch_id,
-        private_key_passphrase=os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
-        or None,
-    )
+        result = run_load(
+            SnowflakeLoadConfig(
+                account=settings.snowflake_account,
+                user=os.environ["SNOWFLAKE_USER"],
+                role=settings.snowflake_loader_role,
+                warehouse=settings.snowflake_warehouse,
+                database=settings.snowflake_database,
+                staging_schema=settings.snowflake_staging_schema,
+                serving_schema=settings.snowflake_serving_schema,
+                stage_name=settings.snowflake_stage_name,
+                bucket=settings.s3_bucket_name,
+                dataset=dataset,
+            ),
+            private_key_pem=os.environ["SNOWFLAKE_PRIVATE_KEY"],
+            batch_id=manifest.batch_id,
+            private_key_passphrase=os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+            or None,
+        )
+    except ValueError as exc:
+        # run_export/run_load raise plain ValueError specifically for their
+        # deterministic, non-retriable business-rule violations (stale or
+        # duplicate batch, schema drift, an unregistered dataset, a failed
+        # validation) - confirmed live 2026-09-27 this otherwise just burns
+        # through every retry hitting the identical rejection. Any other
+        # exception type (a network/S3/Snowflake hiccup) still retries
+        # normally through Airflow's default handling.
+        raise AirflowFailException(str(exc)) from exc
     logger.info(
         "export_and_load(%s): batch=%s status=%s rows_loaded=%d",
         dataset,
