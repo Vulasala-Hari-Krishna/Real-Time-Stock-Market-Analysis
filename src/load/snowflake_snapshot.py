@@ -477,7 +477,19 @@ def copy_into_staging(
     staging_fqn = config.qualified(
         config.staging_schema, DATASET_STAGING_TABLE[config.dataset]
     )
-    select_list = ", ".join(f"$1:{name}::{cast}" for name, cast in columns)
+    select_list = ", ".join(
+        # A direct $1:col::DATE cast only succeeds when the variant's string
+        # form already matches Snowflake's bare YYYY-MM-DD date format - it
+        # rejects a value with any time-of-day component, even midnight,
+        # rather than truncating it. Casting through TIMESTAMP_NTZ first
+        # parses the fuller datetime representation, then truncates to a
+        # calendar date - confirmed live 2026-09-27:
+        # historical_ohlcv's `date` carries yfinance's daily-bar index time
+        # (e.g. "13:30:00.000", the exchange's session-open time, not
+        # midnight), which a bare ::DATE cast rejected outright.
+        f"$1:{name}::TIMESTAMP_NTZ::DATE" if cast == "DATE" else f"$1:{name}::{cast}"
+        for name, cast in columns
+    )
     column_list = ", ".join(name for name, _ in columns)
 
     expected_prefix = f"publish/batches/{batch_id}/"

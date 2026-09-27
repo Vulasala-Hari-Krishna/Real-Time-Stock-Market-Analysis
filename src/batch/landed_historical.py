@@ -117,7 +117,13 @@ def fetch_all_history(
             pdf = pdf[
                 ["symbol", "date", "open", "high", "low", "close", "volume"]
             ].copy()
-            pdf["date"] = pd.to_datetime(pdf["date"], utc=True)
+            # .normalize() zeroes the time-of-day: yfinance's daily-bar index
+            # carries the exchange's session-open time (e.g. 13:30:00 UTC for
+            # NYSE), not midnight - (symbol, date) is meant to be one row per
+            # *trading day*, and a lingering intraday time both misrepresents
+            # that and broke Snowflake's DATE cast on COPY INTO (confirmed
+            # live 2026-09-27 - see snowflake_snapshot.py::copy_into_staging).
+            pdf["date"] = pd.to_datetime(pdf["date"], utc=True).dt.normalize()
             pdf["open"] = pdf["open"].astype(float)
             pdf["high"] = pdf["high"].astype(float)
             pdf["low"] = pdf["low"].astype(float)

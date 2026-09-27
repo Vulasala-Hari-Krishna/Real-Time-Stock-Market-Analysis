@@ -57,6 +57,7 @@ from airflow.decorators import task
 from airflow.exceptions import AirflowException, AirflowFailException
 from airflow.providers.databricks.operators.databricks import DatabricksRunNowOperator
 from airflow.utils.context import Context
+from snowflake.connector.errors import ProgrammingError
 
 from databricks_job_names import job_name
 from src.config.settings import get_settings
@@ -176,14 +177,19 @@ def export_and_load(dataset: str, producer_run_id: str) -> dict[str, object]:
             private_key_passphrase=os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
             or None,
         )
-    except ValueError as exc:
-        # run_export/run_load raise plain ValueError specifically for their
+    except (ValueError, ProgrammingError) as exc:
+        # run_export/run_load raise plain ValueError for their own
         # deterministic, non-retriable business-rule violations (stale or
         # duplicate batch, schema drift, an unregistered dataset, a failed
-        # validation) - confirmed live 2026-09-27 this otherwise just burns
+        # validation). Snowflake's own ProgrammingError signals a SQL
+        # compilation-time error (a bad cast, an unresolvable column) -
+        # also deterministic, confirmed live 2026-09-27 (a DATE-cast
+        # failure kept retrying and failing identically since the data
+        # causing it doesn't change on its own). Both otherwise just burn
         # through every retry hitting the identical rejection. Any other
-        # exception type (a network/S3/Snowflake hiccup) still retries
-        # normally through Airflow's default handling.
+        # exception type (e.g. a transient network/connection issue,
+        # Snowflake's own OperationalError) still retries normally through
+        # Airflow's default handling.
         raise AirflowFailException(str(exc)) from exc
     logger.info(
         "export_and_load(%s): batch=%s status=%s rows_loaded=%d",

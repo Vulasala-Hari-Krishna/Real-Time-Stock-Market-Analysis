@@ -295,12 +295,53 @@ def test_copy_into_staging_builds_delete_then_copy_with_exact_files(
         in copy_sql
     )
     assert "$1:provider::VARCHAR" in copy_sql
-    assert "$1:capture_date_utc::DATE" in copy_sql
+    assert "$1:capture_date_utc::TIMESTAMP_NTZ::DATE" in copy_sql
     assert "FROM (SELECT" in copy_sql and f"FROM @{config.stage_name})" in copy_sql
     assert (
         "FILES = ('batches/batch-1/daily_quote_summary/part-00000.parquet')" in copy_sql
     )
     assert "FILE_FORMAT = (TYPE = PARQUET)" in copy_sql
+
+
+def test_copy_into_staging_casts_date_columns_through_timestamp_ntz(
+    config: loader.SnowflakeLoadConfig,
+) -> None:
+    """Regression test: a bare $1:col::DATE cast only accepts a variant
+    string already shaped like plain YYYY-MM-DD - it rejects any value with
+    a time-of-day component, even midnight, rather than truncating it.
+    historical_ohlcv's `date` carries yfinance's daily-bar index time (the
+    exchange's session-open time, e.g. 13:30:00 UTC - not midnight),
+    confirmed live 2026-09-27 to fail Snowflake's COPY INTO with
+    "Failed to cast variant value ... to DATE". Casting through
+    TIMESTAMP_NTZ first, then to DATE, truncates correctly instead."""
+    historical_config = config.model_copy(update={"dataset": "historical_ohlcv"})
+    entry = ManifestDataset(
+        name="historical_ohlcv",
+        row_count=1,
+        business_keys=["symbol", "date"],
+        columns=[
+            ManifestColumn(name=name, type="string", nullable=True)
+            for name, _ in loader.DATASET_COLUMNS["historical_ohlcv"]
+        ],
+        files=[
+            ManifestFile(
+                key="publish/batches/batch-1/historical_ohlcv/part-00000.parquet",
+                size_bytes=123,
+                sha256="a" * 64,
+                row_count=1,
+            )
+        ],
+    )
+    cursor = FakeCursor()
+    conn = FakeConnection(cursor)
+
+    loader.copy_into_staging(conn, historical_config, entry, "batch-1")
+
+    copy_sql, _ = cursor.executed[1]
+    assert "$1:date::TIMESTAMP_NTZ::DATE" in copy_sql
+    # Non-DATE columns are untouched by this cast rewrite.
+    assert "$1:symbol::VARCHAR" in copy_sql
+    assert "$1:symbol::TIMESTAMP_NTZ" not in copy_sql
 
 
 def test_copy_into_staging_rejects_file_outside_batch_prefix(
